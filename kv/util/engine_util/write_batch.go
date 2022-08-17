@@ -1,3 +1,6 @@
+// defines a WriteBatch to specify a batch of writes, i.e. Puts and Deletes.
+// provides helper functions for performing a batch of writes.
+
 package engine_util
 
 import (
@@ -7,8 +10,10 @@ import (
 )
 
 type WriteBatch struct {
-	entries       []*badger.Entry
-	size          int
+	entries []*badger.Entry // the entries are placed in a linear array.
+
+	// fields below are used for stuff corresponding to safe point.
+	size          int // number of bytes of the linear array.
 	safePoint     int
 	safePointSize int
 	safePointUndo int
@@ -22,10 +27,13 @@ const (
 
 var CFs [3]string = [3]string{CfDefault, CfWrite, CfLock}
 
+// get #writes in the batch.
 func (wb *WriteBatch) Len() int {
 	return len(wb.entries)
 }
 
+// append a Put operation to the batch of writes.
+// the Put operation is not performed until WriteToDB is called.
 func (wb *WriteBatch) SetCF(cf string, key, val []byte) {
 	wb.entries = append(wb.entries, &badger.Entry{
 		Key:   KeyWithCF(cf, key),
@@ -34,13 +42,8 @@ func (wb *WriteBatch) SetCF(cf string, key, val []byte) {
 	wb.size += len(key) + len(val)
 }
 
-func (wb *WriteBatch) DeleteMeta(key []byte) {
-	wb.entries = append(wb.entries, &badger.Entry{
-		Key: key,
-	})
-	wb.size += len(key)
-}
-
+// append a Delete operation to the batch of writes.
+// the Delete operation is not performed until WriteToDB is called.
 func (wb *WriteBatch) DeleteCF(cf string, key []byte) {
 	wb.entries = append(wb.entries, &badger.Entry{
 		Key: KeyWithCF(cf, key),
@@ -61,6 +64,13 @@ func (wb *WriteBatch) SetMeta(key []byte, msg proto.Message) error {
 	return nil
 }
 
+func (wb *WriteBatch) DeleteMeta(key []byte) {
+	wb.entries = append(wb.entries, &badger.Entry{
+		Key: key,
+	})
+	wb.size += len(key)
+}
+
 func (wb *WriteBatch) SetSafePoint() {
 	wb.safePoint = len(wb.entries)
 	wb.safePointSize = wb.size
@@ -71,11 +81,13 @@ func (wb *WriteBatch) RollbackToSafePoint() {
 	wb.size = wb.safePointSize
 }
 
+// perform a batch write to the db. If fails on any write, return the error.
 func (wb *WriteBatch) WriteToDB(db *badger.DB) error {
 	if len(wb.entries) > 0 {
 		err := db.Update(func(txn *badger.Txn) error {
 			for _, entry := range wb.entries {
 				var err1 error
+				// if no value is provided, it's a Delete operation. Otherwise, it's a Put operation.
 				if len(entry.Value) == 0 {
 					err1 = txn.Delete(entry.Key)
 				} else {
@@ -94,6 +106,7 @@ func (wb *WriteBatch) WriteToDB(db *badger.DB) error {
 	return nil
 }
 
+// perform a batch write to the db. If fails on any write, panic.
 func (wb *WriteBatch) MustWriteToDB(db *badger.DB) {
 	err := wb.WriteToDB(db)
 	if err != nil {
@@ -102,7 +115,7 @@ func (wb *WriteBatch) MustWriteToDB(db *badger.DB) {
 }
 
 func (wb *WriteBatch) Reset() {
-	wb.entries = wb.entries[:0]
+	wb.entries = wb.entries[:0] // slice all entries out.
 	wb.size = 0
 	wb.safePoint = 0
 	wb.safePointSize = 0

@@ -49,6 +49,7 @@ func cleanUpTestData(conf *config.Config) error {
 }
 
 func TestRawGet1(t *testing.T) {
+	// start a tinykv server with standalone storage.
 	conf := config.NewTestConfig()
 	s := standalone_storage.NewStandAloneStorage(conf)
 	s.Start()
@@ -56,9 +57,12 @@ func TestRawGet1(t *testing.T) {
 	defer cleanUpTestData(conf)
 	defer s.Stop()
 
+	// directly put a key-value pair into the underly storage.
 	cf := engine_util.CfDefault
 	Set(s, cf, []byte{99}, []byte{42})
 
+	// then directly call the RawGet service of the tinykv server.
+	// note, RPC is not involved in the test suites of project 1.
 	req := &kvrpcpb.RawGetRequest{
 		Key: []byte{99},
 		Cf:  cf,

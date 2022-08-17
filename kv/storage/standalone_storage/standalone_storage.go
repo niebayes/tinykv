@@ -27,12 +27,12 @@ func (s *StandAloneStorage) Stop() error {
 	return nil
 }
 
-func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
-	// Your Code Here (1).
-	return nil, nil
-}
-
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
 	// Your Code Here (1).
 	return nil
+}
+
+func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
+	// Your Code Here (1).
+	return nil, nil
 }
