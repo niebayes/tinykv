@@ -11,39 +11,50 @@ import (
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 )
 
-// reader for a standalone storage.
+// reader for a snapshot of a standalone storage.
 type StandAloneStorageReader struct {
-	db *badger.DB // the underlying store to read from.
+	db   *badger.DB                  // the underlying store to read from.
+	txn  *badger.Txn                 // the transaction wrapping these read operations on the snapshot.
+	iter *engine_util.BadgerIterator // the iterator to the snapshot of the underlying store.
 }
 
 func (reader *StandAloneStorageReader) GetCF(cf string, key []byte) ([]byte, error) {
-	return engine_util.GetCF(reader.db, cf, key)
+	return engine_util.GetCFFromTxn(reader.txn, cf, key)
 }
 
 func (reader *StandAloneStorageReader) IterCF(cf string) engine_util.DBIterator {
-	txn := reader.db.NewTransaction(false)
-	return engine_util.NewCFIterator(cf, txn)
+	if reader.iter == nil {
+		reader.iter = engine_util.NewCFIterator(cf, reader.txn)
+	}
+	return reader.iter
 }
 
 func (reader *StandAloneStorageReader) Close() {
-	
+	if reader.iter != nil {
+		reader.iter.Close()
+		reader.iter = nil
+	}
+	if reader.txn != nil {
+		reader.txn.Discard()
+		reader.txn = nil
+	}
 }
 
 // StandAloneStorage is an implementation of `Storage` for a single-node TinyKV instance. It does not
 // communicate with other nodes and all data is stored locally.
 type StandAloneStorage struct {
-	db     *badger.DB // the underlying store.
-	reader *StandAloneStorageReader
+	db     *badger.DB               // the underlying store.
+	reader *StandAloneStorageReader // reader for a snapshot of the underlying store.
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
 	storage := &StandAloneStorage{}
-	storage.db = new(badger.DB)
-	storage.reader.db = storage.db 
 	return storage
 }
 
 func (s *StandAloneStorage) Start() error {
+	s.db = new(badger.DB)
+	s.reader.db = s.db
 	return nil
 }
 
@@ -69,9 +80,13 @@ func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) 
 	return write_batch.WriteToDB(s.db)
 }
 
+// create a reader for the current snapshot of the underlying store.
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
-	if s.reader == nil {
-		return nil, errors.New("reader is not created yet")
+	// close the last reader if exists.
+	if s.reader != nil {
+		s.reader.Close()
 	}
+	// start a new reader on the current snapshot, i.e. start a new transaction.
+	s.reader.txn = s.db.NewTransaction(false) // read-only transaction.
 	return s.reader, nil
 }

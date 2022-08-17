@@ -13,6 +13,7 @@ import (
 	"github.com/pingcap/tidb/kv"
 )
 
+// FIXME: what does the underline "_" mean?
 var _ tinykvpb.TinyKvServer = new(Server)
 
 // Server is a TinyKV server, it 'faces outwards', sending and receiving messages from clients such as TinySQL.
