@@ -80,6 +80,7 @@ func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) 
 	return write_batch.WriteToDB(s.db)
 }
 
+// FIXME: clarify the role of Reader.
 // create a reader for the current snapshot of the underlying store.
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
 	// close the last reader if exists.
