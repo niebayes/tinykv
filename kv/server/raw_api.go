@@ -32,10 +32,12 @@ func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kv
 	if err != nil {
 		return nil, err
 	}
+	not_found := (val == nil)
 
 	// compose the response.
 	res := &kvrpcpb.RawGetResponse{
 		Value: val,
+		NotFound: not_found,
 	}
 
 	return res, nil
