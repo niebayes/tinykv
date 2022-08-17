@@ -40,6 +40,7 @@ func Iter(s *standalone_storage.StandAloneStorage, cf string) (engine_util.DBIte
 	return reader.IterCF(cf), nil
 }
 
+// clean up temporary directories and files after testing.
 func cleanUpTestData(conf *config.Config) error {
 	if conf != nil {
 		return os.RemoveAll(conf.DBPath)
