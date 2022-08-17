@@ -20,6 +20,7 @@ type StandAloneStorageReader struct {
 func (reader *StandAloneStorageReader) GetCF(cf string, key []byte) ([]byte, error) {
 	val, err := engine_util.GetCFFromTxn(reader.txn, cf, key)
 	if err == badger.ErrKeyNotFound {
+		// the test suites expect to return nil for error.
 		return nil, nil
 	}
 	if err != nil {

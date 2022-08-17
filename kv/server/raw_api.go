@@ -127,6 +127,7 @@ func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*
 			Key:   key,
 			Value: val,
 		})
+		cnt++
 	}
 
 	// compose the response.
