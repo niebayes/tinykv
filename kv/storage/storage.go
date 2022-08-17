@@ -13,6 +13,7 @@ type Storage interface {
 
 	// @note: ctx context is unused until project 4.
 	Write(ctx *kvrpcpb.Context, batch []Modify) error   // write a batch of modifications to the underlying store.
+	// FIXME: why return an instance of StorageReader rather than a reference?
 	Reader(ctx *kvrpcpb.Context) (StorageReader, error) // get the reader of the underlying store.
 }
 
