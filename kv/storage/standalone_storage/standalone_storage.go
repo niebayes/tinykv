@@ -7,7 +7,6 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
-	"github.com/pingcap-incubator/tinykv/kv/util/write_batch"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 )
 
@@ -45,16 +44,30 @@ func (reader *StandAloneStorageReader) Close() {
 type StandAloneStorage struct {
 	db     *badger.DB               // the underlying store.
 	reader *StandAloneStorageReader // reader for a snapshot of the underlying store.
+	cfg *config.Config 
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
 	storage := &StandAloneStorage{}
+	storage.cfg = conf
 	return storage
 }
 
 func (s *StandAloneStorage) Start() error {
-	s.db = new(badger.DB)
-	s.reader.db = s.db
+	// open a badger DB as the underlying store.
+	options := badger.DefaultOptions
+	options.Dir = s.cfg.DBPath
+	options.ValueDir = s.cfg.DBPath
+	db, err := badger.Open(options)
+	if err != nil {
+		return err
+	}
+	s.db = db
+
+	// new vs. &SomeType{} in Go.
+	// @ref: https://stackoverflow.com/a/34543716
+	s.reader = new(StandAloneStorageReader)
+	s.reader.db = s.db  // associate the reader with the underlying store.
 	return nil
 }
 
