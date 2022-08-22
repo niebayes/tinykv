@@ -89,8 +89,6 @@ func (s *StandAloneStorage) Stop() error {
 }
 
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
-	// Your Code Here (1).
-
 	// wrap the batch of writes to a WriteBatch.
 	write_batch := new(engine_util.WriteBatch)
 	for _, modify := range batch {
