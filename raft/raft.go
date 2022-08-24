@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -59,7 +60,7 @@ type Config struct {
 
 	// ElectionTick is the number of Node.Tick invocations that must pass between
 	// elections. That is, if a follower does not receive any message from the
-	// leader of current term before ElectionTick has elapsed, it will become
+	// leader of current term when ElectionTick has elapsed, it will become
 	// candidate and start an election. ElectionTick must be greater than
 	// HeartbeatTick. We suggest ElectionTick = 10 * HeartbeatTick to avoid
 	// unnecessary leader switching.
@@ -108,7 +109,8 @@ type Progress struct {
 }
 
 type Raft struct {
-	id uint64
+	id    uint64
+	peers []uint64
 
 	Term uint64
 	Vote uint64
@@ -122,24 +124,32 @@ type Raft struct {
 	// this peer's role
 	State StateType
 
-	// votes records
+	// votes records:
+	// if a node with id id has not votes for me in the current term yet, key id does not exist.
+	// if a node with id id supports me to become the leader, votes[id] = true.
+	// if a node with id id rejects me to become the leader, votes[id] = false.
 	votes map[uint64]bool
 
-	// msgs need to send
+	// msgs need to send.
 	msgs []pb.Message
 
 	// the leader id
 	Lead uint64
 
-	// heartbeat interval, should send
+	// heartbeat interval
 	heartbeatTimeout int
-	// baseline of election interval
+	// baseline of election interval.
+	electionTimeoutBase int
+	// the actual election interval.
+	// electionTimeout = electionTimeoutBase + randomTimeout
+	// where randomTimeout is chosed randomly in the range [electionTimeoutBase, 2*electionTimeoutBase].
 	electionTimeout int
+
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
-	// Ticks since it reached last electionTimeout when it is leader or candidate.
-	// Number of ticks since it reached last electionTimeout or received a
+	// number of ticks since it reached last electionTimeout when it is leader or candidate.
+	// number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
 	electionElapsed int
 
@@ -164,68 +174,378 @@ func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
-	// Your Code Here (2A).
-	return nil
+
+	r := &Raft{
+		id: c.ID,
+		// FIXME: Shall I deep-copy the peers slice?
+		peers:            c.peers,
+		Term:             0,
+		Vote:             None,
+		RaftLog:          newLog(c.Storage),
+		Prs:              make(map[uint64]*Progress),
+		State:            StateFollower,
+		votes:            make(map[uint64]bool),
+		msgs:             make([]pb.Message, 0),
+		Lead:             None,
+		heartbeatTimeout: c.HeartbeatTick,
+		electionTimeout:  c.ElectionTick,
+		heartbeatElapsed: 0,
+		electionElapsed:  0,
+	}
+
+	return r
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
-	// Your Code Here (2A).
 	return false
+}
+
+func (r *Raft) bcastAppendEntries() {
+
+}
+
+func (r *Raft) makeNoopEntry() []*pb.Entry {
+	noop_entry := make([]*pb.Entry, 0)
+	noop_entry = append(noop_entry, &pb.Entry{
+		EntryType: pb.EntryType_EntryNoop,
+		Term:      r.Term,
+		Index:     r.RaftLog.LastIndex() + 1,
+		Data:      make([]byte, 0),
+	})
+	return noop_entry
+}
+
+func (r *Raft) makeAppendEntriesNoop(to uint64) pb.Message {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		Entries: r.makeNoopEntry(),
+	}
+	return msg
+}
+
+func (r *Raft) sendAppendEntriesNoop(to uint64) {
+	msg := r.makeAppendEntriesNoop(to)
+	r.msgs = append(r.msgs, msg)
+}
+
+// upon becoming a new leader, broadcast a no-op entry to claim the leadership
+// and keep other servers' log in sync.
+func (r *Raft) bcastAppendEntriesNoop() {
+	for _, to := range r.peers {
+		// skip myself.
+		if to != r.id {
+			r.sendAppendEntriesNoop(to)
+		}
+	}
+}
+
+func (r *Raft) makeRequestVote(to uint64) pb.Message {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgRequestVote,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+	}
+	return msg
+}
+
+func (r *Raft) sendRequestVote(to uint64) {
+	msg := r.makeRequestVote(to)
+	r.msgs = append(r.msgs, msg)
+}
+
+// upon becoming a new candidate, broadcast a RequestVote to start a new round of election.
+func (r *Raft) bcastRequestVote() {
+	for _, to := range r.peers {
+		// skip myself.
+		if to != r.id {
+			r.sendRequestVote(to)
+		}
+	}
+}
+
+func (r *Raft) makeHeartbeat(to uint64) pb.Message {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		// heartbeat conveys empty entries.
+		Entries: make([]*pb.Entry, 0),
+	}
+	return msg
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
-	// Your Code Here (2A).
+	msg := r.makeHeartbeat(to)
+	r.msgs = append(r.msgs, msg)
+}
+
+func (r *Raft) bcastHeartbeat() {
+	for _, to := range r.peers {
+		if to != r.id {
+			r.sendHeartbeat(to)
+		}
+	}
+}
+
+// advance election timer and check if it times out. If times out, become candidate.
+// only followers and candidates keep track of the election timer.
+func (r *Raft) tickElection() {
+	r.electionElapsed++
+	if r.electionElapsed >= r.electionTimeout {
+		r.becomeCandidate()
+		r.bcastRequestVote()
+	}
+}
+
+// advance heartbeat timer and check if it times out. It times out, broadcast heartbeats.
+// only leaders keep track of the heartbeat timer.
+func (r *Raft) tickHeartbeat() {
+	r.heartbeatElapsed++
+	if r.heartbeatElapsed >= r.heartbeatTimeout {
+		r.bcastHeartbeat()
+	}
 }
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
-	// Your Code Here (2A).
+	switch r.State {
+	case StateFollower:
+		r.tickElection()
+	case StateCandidate:
+		r.tickElection()
+	case StateLeader:
+		r.tickHeartbeat()
+	default:
+		panic("invalid state")
+	}
 }
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
-	// Your Code Here (2A).
+	r.State = StateFollower
+	r.Term = term
+	r.votes = make(map[uint64]bool)
+	r.Vote = None
+	r.Lead = lead
+}
+
+func (r *Raft) resetElectionTimer() {
+	r.electionElapsed = 0
+	// raft introduces randomization into election timer to resolve split vote faster.
+	r.electionTimeout = r.electionTimeoutBase + (rand.Int() % r.electionTimeoutBase)
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
-	// Your Code Here (2A).
+	if r.State != StateFollower && r.State != StateCandidate {
+		panic("invalid state transition")
+	}
+	// increment term.
+	r.Term++
+
+	// vote for self.
+	r.Vote = r.id
+	r.votes = make(map[uint64]bool)
+	r.votes[r.id] = true
+
+	// reset election timer.
+	r.resetElectionTimer()
+
+	// now it's safe to become a candidate.
+	r.State = StateCandidate
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
-	// Your Code Here (2A).
-	// NOTE: Leader should propose a noop entry on its term
+	r.State = StateLeader
 }
 
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
-func (r *Raft) Step(m pb.Message) error {
-	// Your Code Here (2A).
-	switch r.State {
-	case StateFollower:
-	case StateCandidate:
-	case StateLeader:
+func (r *Raft) Step(msg pb.Message) error {
+	// FIXME: Shall I differentiate between local messages and network messages?
+	switch msg.MsgType {
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(msg)
+	case pb.MessageType_MsgRequestVoteResponse:
+		r.handleRequestVoteResponse(msg)
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(msg)
+	case pb.MessageType_MsgHeartbeatResponse:
+		r.handleHeartbeatResponse(msg)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(msg)
+	case pb.MessageType_MsgAppendResponse:
+		r.handleAppendEntriesResponse(msg)
+	default:
+		panic("invalid msg type")
 	}
 	return nil
 }
 
+// handle RequestVote RPC request.
+func (r *Raft) handleRequestVote(req pb.Message) {
+	// if I'm stale, keep pace with the candidate.
+	if req.Term > r.Term {
+		// update my term, since
+		r.becomeFollower(req.Term, req.From)
+	}
+
+	reject := true // reject granting the vote?
+	// grant vote only if he is not stale.
+	// FIXME: Shall check state? For e.g. only candidate or follower can grant vote?
+	if req.Term >= r.Term {
+		// r.Vote == req.From says: since the network may duplicate the RPC request,
+		// I have to vote for the same candidate once again if necessary.
+		if r.Vote == None || r.Vote == req.From {
+			r.Vote = req.From
+			reject = false
+		}
+	}
+
+	// reset election timer since I've granted the vote and this may result in spawning a new leader.
+	// I don't want to compete with the new leader.
+	if !reject {
+		r.resetElectionTimer()
+	}
+
+	// construct RequestVote response.
+	res := pb.Message{
+		MsgType: pb.MessageType_MsgRequestVoteResponse,
+		To:      req.From,
+		From:    r.id,
+		Term:    r.Term,
+		Reject:  reject,
+	}
+	// send the response.
+	r.msgs = append(r.msgs, res)
+}
+
+// handle RequestVote RPC response.
+func (r *Raft) handleRequestVoteResponse(res pb.Message) {
+	if res.Term > r.Term {
+		r.becomeFollower(res.Term, res.From)
+		// stop voting if I step down.
+		return
+	}
+
+	if r.State != StateCandidate {
+		// stop voting if I'm not a candidate any more. I.e. I'm the leader and this response is stale.
+		return
+	}
+
+	// whatever the from node voted for or against, record it.
+	r.votes[res.From] = res.Reject == true
+
+	num_supports := 0 // number of nodes supporting me to become the leader.
+	num_denials := 0  // number of nodes rejecting me to become the leader.
+	for _, support := range r.votes {
+		if support {
+			num_supports++
+		} else {
+			num_denials++
+		}
+	}
+
+	// a majority of nodes in the cluster support me, I become the new leader.
+	if 2*num_supports > len(r.peers) {
+		r.becomeLeader()
+		// upon becoming a new leader, broadcast a no-op entry to claim the leadership
+		// and keep other nodes' log in sync.
+		r.bcastAppendEntriesNoop()
+		return
+	}
+
+	// a majority of nodes in the cluster reject me, I step down.
+	if 2*num_denials > len(r.peers) {
+		r.becomeFollower(r.Term, res.From)
+	}
+}
+
 // handleAppendEntries handle AppendEntries RPC request
-func (r *Raft) handleAppendEntries(m pb.Message) {
-	// Your Code Here (2A).
+func (r *Raft) handleAppendEntries(req pb.Message) {
+	// step down if I'm stale.
+	if req.Term > r.Term {
+		r.becomeFollower(req.Term, req.From)
+	}
+
+	// reject if the from node is stale.
+	reject := false
+	if req.Term < r.Term {
+		reject = true
+	}
+
+	if !reject {
+		// I admit the from node is the current leader, so I step down and reset election timer
+		// to not compete with him.
+		r.becomeFollower(req.Term, req.From)
+		r.resetElectionTimer()
+	}
+
+	// construct the response.
+	res := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      req.From,
+		From:    r.id,
+		Reject:  reject,
+	}
+
+	// send the response.
+	r.msgs = append(r.msgs, res)
+}
+
+// handle AppendEntries RPC response.
+func (r *Raft) handleAppendEntriesResponse(res pb.Message) {
+
 }
 
 // handleHeartbeat handle Heartbeat RPC request
-func (r *Raft) handleHeartbeat(m pb.Message) {
-	// Your Code Here (2A).
+func (r *Raft) handleHeartbeat(req pb.Message) {
+	// step down if I'm stale.
+	if req.Term > r.Term {
+		r.becomeFollower(req.Term, req.From)
+	}
+
+	// reject if the from node is stale.
+	reject := false
+	if req.Term < r.Term {
+		reject = true
+	}
+
+	if !reject {
+		// I admit the from node is the current leader, so I step down and reset election timer
+		// to not compete with him.
+		r.becomeFollower(req.Term, req.From)
+		r.resetElectionTimer()
+	}
+
+	// construct the response.
+	res := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      req.From,
+		From:    r.id,
+		Reject:  reject,
+	}
+
+	// send the response.
+	r.msgs = append(r.msgs, res)
+}
+
+// handle Heartbeat RPC response.
+func (r *Raft) handleHeartbeatResponse(res pb.Message) {
+
 }
 
 // handleSnapshot handle Snapshot RPC request
-func (r *Raft) handleSnapshot(m pb.Message) {
-	// Your Code Here (2C).
+func (r *Raft) handleSnapshot(msg pb.Message) {
 }
 
 // addNode add a new node to raft group

@@ -2,8 +2,9 @@ syntax = "proto3";
 package eraftpb;
 
 enum EntryType {
-    EntryNormal = 0;
-    EntryConfChange = 1;
+    EntryNoop = 0;
+    EntryNormal = 1;
+    EntryConfChange = 2;
 }
 
 // The entry is a type of change that needs to be applied. It contains two data fields.
@@ -78,6 +79,8 @@ message Message {
     repeated Entry entries = 7;
     uint64 commit = 8;
     Snapshot snapshot = 9;
+    // in leader election: true if from node has rejected to grant the vote.
+    // in log replication: true if from node has rejected to append entries.
     bool reject = 10;
 }
 
