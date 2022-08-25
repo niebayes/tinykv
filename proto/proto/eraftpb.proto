@@ -2,9 +2,9 @@ syntax = "proto3";
 package eraftpb;
 
 enum EntryType {
-    EntryNoop = 0;
-    EntryNormal = 1;
-    EntryConfChange = 2;
+    EntryNormal = 0;
+    EntryConfChange = 1;
+    EntryNoop = 2;
 }
 
 // The entry is a type of change that needs to be applied. It contains two data fields.
