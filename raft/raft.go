@@ -286,7 +286,7 @@ func (r *Raft) sendRequestVote(to uint64) {
 	r.msgs = append(r.msgs, msg)
 }
 
-// upon becoming a new candidate, broadcast a RequestVote to start a new round of election.
+// upon becoming a new candidate, broadcast RequestVote RPCs to start a new round of election.
 func (r *Raft) bcastRequestVote() {
 	for _, to := range r.peers {
 		// skip myself.
@@ -411,6 +411,8 @@ func (r *Raft) stepFollower(msg pb.Message) {
 	switch msg.MsgType {
   case pb.MessageType_MsgHup:
     r.handleMsgHup(msg)
+  case pb.MessageType_MsgBeat:
+    // dropped.
 	case pb.MessageType_MsgPropose:
 		r.appendEntries(msg.Entries)
 	case pb.MessageType_MsgRequestVote:
@@ -434,6 +436,8 @@ func (r *Raft) stepCandidate(msg pb.Message) {
 	switch msg.MsgType {
   case pb.MessageType_MsgHup:
     r.handleMsgHup(msg)
+  case pb.MessageType_MsgBeat:
+    // dropped.
 	case pb.MessageType_MsgPropose:
 		// dropped.
 	case pb.MessageType_MsgRequestVote:
@@ -459,17 +463,25 @@ func (r *Raft) appendEntries(entries []*pb.Entry) {
 	}
 }
 
+func (r *Raft) handleBeat(msg pb.Message) {
+  r.bcastHeartbeat()
+}
+
 func (r *Raft) stepLeader(msg pb.Message) {
 	switch msg.MsgType {
+  case pb.MessageType_MsgHup:
+    // dropped.
+  case pb.MessageType_MsgBeat:
+    r.handleBeat(msg)
 	case pb.MessageType_MsgPropose:
 		r.appendEntries(msg.Entries)
 		r.bcastAppendEntries()
 	case pb.MessageType_MsgRequestVote:
-		// dropped.
+    r.handleRequestVote(msg)
 	case pb.MessageType_MsgRequestVoteResponse:
-		// dropped.
+    r.handleRequestVoteResponse(msg)
 	case pb.MessageType_MsgHeartbeat:
-		// dropped.
+		r.handleHeartbeat(msg)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(msg)
 	case pb.MessageType_MsgAppend:
@@ -506,6 +518,12 @@ func (r *Raft) Step(msg pb.Message) error {
 // handle MsgHup message
 func (r *Raft) handleMsgHup(msg pb.Message) {
   r.becomeCandidate()
+  // if the cluster only contain one node, this node immediately becomes the leader.
+  if len(r.peers) == 1 {
+    r.becomeLeader()
+    return
+  }
+  // otherwise, there must be a majority of votes from the cluster to become the leader.
   r.bcastRequestVote()
 }
 
@@ -561,7 +579,7 @@ func (r *Raft) handleRequestVoteResponse(res pb.Message) {
 	}
 
 	// whatever the from node voted for or against, record it.
-	r.votes[res.From] = res.Reject == true
+	r.votes[res.From] = !res.Reject
 
 	num_supports := 0 // number of nodes supporting me to become the leader.
 	num_denials := 0  // number of nodes rejecting me to become the leader.
