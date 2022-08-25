@@ -178,32 +178,59 @@ func newRaft(c *Config) *Raft {
 	r := &Raft{
 		id: c.ID,
 		// FIXME: Shall I deep-copy the peers slice?
-		peers:            c.peers,
-		Term:             0,
-		Vote:             None,
-		RaftLog:          newLog(c.Storage),
-		Prs:              make(map[uint64]*Progress),
-		State:            StateFollower,
-		votes:            make(map[uint64]bool),
-		msgs:             make([]pb.Message, 0),
-		Lead:             None,
-		heartbeatTimeout: c.HeartbeatTick,
-		electionTimeout:  c.ElectionTick,
-		heartbeatElapsed: 0,
-		electionElapsed:  0,
+		peers:               c.peers,
+		Term:                0,
+		Vote:                None,
+		RaftLog:             newLog(c.Storage),
+		Prs:                 make(map[uint64]*Progress),
+		State:               StateFollower,
+		votes:               make(map[uint64]bool),
+		msgs:                make([]pb.Message, 0),
+		Lead:                None,
+		heartbeatTimeout:    c.HeartbeatTick,
+		electionTimeout:     c.ElectionTick,
+		electionTimeoutBase: c.ElectionTick,
+		heartbeatElapsed:    0,
+		electionElapsed:     0,
 	}
 
 	return r
 }
 
+func (r *Raft) makeEntries() []*pb.Entry {
+	entries := make([]*pb.Entry, 0)
+	for _, entry := range r.RaftLog.entries {
+		entries = append(entries, &entry)
+	}
+	return entries
+}
+
+func (r *Raft) makeAppendEntries(to uint64) pb.Message {
+	entries := r.makeEntries()
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		Entries: entries,
+	}
+	return msg
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
-	return false
+	msg := r.makeAppendEntries(to)
+	r.msgs = append(r.msgs, msg)
+	return true
 }
 
 func (r *Raft) bcastAppendEntries() {
-
+	for _, to := range r.peers {
+		if to != r.id {
+			r.sendAppend(to)
+		}
+	}
 }
 
 func (r *Raft) makeNoopEntry() []*pb.Entry {
@@ -276,7 +303,10 @@ func (r *Raft) makeHeartbeat(to uint64) pb.Message {
 		From:    r.id,
 		Term:    r.Term,
 		// heartbeat conveys empty entries.
-		Entries: make([]*pb.Entry, 0),
+		// the test suites require it to be nil rather than empty slice
+		Entries: nil,
+		Index:   0,
+		LogTerm: 0,
 	}
 	return msg
 }
@@ -300,9 +330,11 @@ func (r *Raft) bcastHeartbeat() {
 func (r *Raft) tickElection() {
 	r.electionElapsed++
 	if r.electionElapsed >= r.electionTimeout {
-		r.becomeCandidate()
-		r.bcastRequestVote()
-	}
+    msg := pb.Message{
+      MsgType: pb.MessageType_MsgHup,
+    }
+    r.Step(msg)
+  }
 }
 
 // advance heartbeat timer and check if it times out. It times out, broadcast heartbeats.
@@ -329,12 +361,15 @@ func (r *Raft) tick() {
 }
 
 // becomeFollower transform this peer's state to Follower
+// @param term
+// @param lead the node with id lead is believed to be the current leader.
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.State = StateFollower
 	r.Term = term
+	r.Lead = lead
+
 	r.votes = make(map[uint64]bool)
 	r.Vote = None
-	r.Lead = lead
 }
 
 func (r *Raft) resetElectionTimer() {
@@ -365,20 +400,76 @@ func (r *Raft) becomeCandidate() {
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
+	// reset vote record since leader does not need them.
+	r.Vote = None
+	r.votes = make(map[uint64]bool)
+
 	r.State = StateLeader
 }
 
-// Step the entrance of handle message, see `MessageType`
-// on `eraftpb.proto` for what msgs should be handled
-func (r *Raft) Step(msg pb.Message) error {
-	// FIXME: Shall I differentiate between local messages and network messages?
+func (r *Raft) stepFollower(msg pb.Message) {
 	switch msg.MsgType {
+  case pb.MessageType_MsgHup:
+    r.handleMsgHup(msg)
+	case pb.MessageType_MsgPropose:
+		r.appendEntries(msg.Entries)
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(msg)
+	case pb.MessageType_MsgRequestVoteResponse:
+		// dropped.
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(msg)
+	case pb.MessageType_MsgHeartbeatResponse:
+		// dropped.
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(msg)
+	case pb.MessageType_MsgAppendResponse:
+		// dropped.
+	default:
+		panic("invalid msg type")
+	}
+}
+
+func (r *Raft) stepCandidate(msg pb.Message) {
+	switch msg.MsgType {
+  case pb.MessageType_MsgHup:
+    r.handleMsgHup(msg)
+	case pb.MessageType_MsgPropose:
+		// dropped.
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(msg)
 	case pb.MessageType_MsgRequestVoteResponse:
 		r.handleRequestVoteResponse(msg)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(msg)
+	case pb.MessageType_MsgHeartbeatResponse:
+		// dropped.
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(msg)
+	case pb.MessageType_MsgAppendResponse:
+		// dropped.
+	default:
+		panic("invalid msg type")
+	}
+}
+
+func (r *Raft) appendEntries(entries []*pb.Entry) {
+	for _, entry := range entries {
+		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
+	}
+}
+
+func (r *Raft) stepLeader(msg pb.Message) {
+	switch msg.MsgType {
+	case pb.MessageType_MsgPropose:
+		r.appendEntries(msg.Entries)
+		r.bcastAppendEntries()
+	case pb.MessageType_MsgRequestVote:
+		// dropped.
+	case pb.MessageType_MsgRequestVoteResponse:
+		// dropped.
+	case pb.MessageType_MsgHeartbeat:
+		// dropped.
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(msg)
 	case pb.MessageType_MsgAppend:
@@ -388,7 +479,34 @@ func (r *Raft) Step(msg pb.Message) error {
 	default:
 		panic("invalid msg type")
 	}
+}
+
+// Step the entrance of handle message, see `MessageType`
+// on `eraftpb.proto` for what msgs should be handled
+func (r *Raft) Step(msg pb.Message) error {
+	// TODO:
+	// Note that every step is checked by one common method
+	// 'Step' that safety-checks the terms of node and incoming message to prevent
+	// stale log entries:
+
+	// FIXME: Shall I differentiate between local messages and network messages?
+	switch r.State {
+	case StateFollower:
+		r.stepFollower(msg)
+	case StateCandidate:
+		r.stepCandidate(msg)
+	case StateLeader:
+		r.stepLeader(msg)
+	default:
+		panic("invalid state")
+	}
 	return nil
+}
+
+// handle MsgHup message
+func (r *Raft) handleMsgHup(msg pb.Message) {
+  r.becomeCandidate()
+  r.bcastRequestVote()
 }
 
 // handle RequestVote RPC request.
@@ -483,6 +601,7 @@ func (r *Raft) handleAppendEntries(req pb.Message) {
 		reject = true
 	}
 
+	// FIXME: Is this strategy correct?
 	if !reject {
 		// I admit the from node is the current leader, so I step down and reset election timer
 		// to not compete with him.
