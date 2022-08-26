@@ -4,7 +4,6 @@ package eraftpb;
 enum EntryType {
     EntryNormal = 0;
     EntryConfChange = 1;
-    EntryNoop = 2;
 }
 
 // The entry is a type of change that needs to be applied. It contains two data fields.
@@ -19,6 +18,8 @@ enum EntryType {
 // is for the user to set and use in this case.
 message Entry {
     EntryType entry_type = 1;
+    // term, index are populated by the raft module.
+    // entry_type and data are populated by the upper application.
     uint64 term = 2;
     uint64 index = 3;
     bytes data = 4;

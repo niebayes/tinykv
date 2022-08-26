@@ -27,9 +27,12 @@ import (
 // @param term
 // @param lead the node with id lead is believed to be the current leader.
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
-	r.Term = term
+	// FIXME: Shall I differentiate between step down and become follower?
+	if term > r.Term {
+		r.Term = term
+		r.resetVoteRecord()
+	}
 	r.Lead = lead
-	r.resetVoteRecord()
 	r.State = StateFollower
 }
 
@@ -146,6 +149,7 @@ func (r *Raft) handleRequestVoteResponse(res pb.Message) {
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	r.resetVoteRecord()
+	r.resetPeerProgress()
 	r.State = StateLeader
 }
 
@@ -190,13 +194,25 @@ func (r *Raft) sendRequestVote(to uint64) {
 	r.forwardMsgUp(msg)
 }
 
+// reset progress of each peer except this node itself.
+// called when the node boots up or wins an election.
+func (r *Raft) resetPeerProgress() {
+	for _, id := range r.peers {
+		r.Prs[id] = &Progress{
+			Next:  r.RaftLog.LastIndex() + 1,
+			Match: 0,
+		}
+	}
+}
+
+// the tests assume a no-op entry is an entry with nil Data.
 func (r *Raft) makeNoopEntry() []*pb.Entry {
 	noop_entry := make([]*pb.Entry, 0)
 	noop_entry = append(noop_entry, &pb.Entry{
-		EntryType: pb.EntryType_EntryNoop,
+		EntryType: pb.EntryType_EntryNormal,
 		Term:      r.Term,
 		Index:     r.RaftLog.LastIndex() + 1,
-		Data:      make([]byte, 0),
+		Data:      nil,
 	})
 	return noop_entry
 }

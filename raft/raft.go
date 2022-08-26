@@ -48,7 +48,12 @@ var ErrProposalDropped = errors.New("raft proposal dropped")
 // Progress represents a follower’s progress in the view of the leader. Leader maintains
 // progresses of all followers, and sends entries to the follower based on its progress.
 type Progress struct {
-	Match, Next uint64
+	// match index, the index of the highest log entry known to be replicated on server.
+	// init to 0 and increases monotonically.
+	Match uint64
+	// next index, the index of the next log entry to send to that server.
+	// init to leader last log index + 1.
+	Next uint64
 }
 
 type Raft struct {
@@ -62,6 +67,8 @@ type Raft struct {
 	RaftLog *RaftLog
 
 	// log replication progress of each peers
+	// the reason why use a map for Prs is that some nodes may go down and when leader awares of it,
+	// the corresponding item in the Prs map can be removed, so that some delayed RPCs can be dropped.
 	Prs map[uint64]*Progress
 
 	// this peer's role
@@ -137,6 +144,16 @@ func newRaft(c *Config) *Raft {
 		electionElapsed:     0,
 	}
 
+	// init progress.
+	r.resetPeerProgress()
+
+	// recovery.
+	hardstate, _, _ := c.Storage.InitialState()
+	r.Vote = hardstate.Vote
+	r.Term = hardstate.Term
+	r.RaftLog.committed = hardstate.Commit
+	// TODO: restore persisted log from snapshot.
+
 	return r
 }
 
@@ -193,6 +210,11 @@ func (r *Raft) tickHeartbeat() {
 //
 
 func (r *Raft) Step(msg pb.Message) error {
+	// drop all stale msgs.
+	if msg.Term < r.Term {
+		return nil
+	}
+
 	switch r.State {
 	case StateFollower:
 		r.stepFollower(msg)

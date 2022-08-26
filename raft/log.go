@@ -14,7 +14,9 @@
 
 package raft
 
-import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+import (
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+)
 
 // RaftLog manage the log entries, its struct look like:
 //
@@ -22,8 +24,18 @@ import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 //  --------|------------------------------------------------|
 //                            log entries
 //
-// for simplify the RaftLog implement should manage all log entries
-// that not truncated
+// for simplicity the RaftLog implementation should manage all log entries
+// that not truncated, i.e. not snapshoted.
+
+// raft log has three constituents:
+//		snapshot + stable log + unstable log
+// snapshot: compacted log entries.
+// stable log: persisted log entries.
+// unstable log: to-to-persisted log entries.
+//
+// note, stable != commited. Even if log entries are persisted, they may not be committed yet
+// and even may be discarded.
+
 type RaftLog struct {
 	// storage contains all stable entries since the last snapshot.
 	storage Storage
@@ -39,32 +51,114 @@ type RaftLog struct {
 
 	// log entries with index <= stabled are persisted to storage.
 	// It is used to record the logs that are not persisted by storage yet.
+	// I.e. log entries with index > stabled are not persisted yet.
 	// Everytime handling `Ready`, the unstabled logs will be included.
 	stabled uint64
 
-	// all entries that have not yet compact.
+	// all entries that have not yet compact, i.e. not snapshoted.
+	// entries = stable log entries + unstable log entries.
 	entries []pb.Entry
 
 	// the incoming unstable snapshot, if any.
 	// (Used in 2C)
 	pendingSnapshot *pb.Snapshot
-
-	// Your Data Here (2A).
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
-	// Your Code Here (2A).
 	raft_log := &RaftLog{
-		storage: storage,
+		storage:   storage,
 		committed: 0,
-		applied: 0,
-		stabled: 0,
-		entries: make([]pb.Entry, 0),
+		applied:   0,
+		stabled:   0,
+		// FIXME: Shall I append a dummy entry?
+		// append a dummy entry while init to simplify log processing and indexing.
+		entries:         make([]pb.Entry, 0),
 		pendingSnapshot: &pb.Snapshot{},
 	}
 	return raft_log
+}
+
+// unstableEntries return all the unstable entries
+func (l *RaftLog) unstableEntries() []pb.Entry {
+	return l.entries[l.stabled:]
+}
+
+// nextEnts returns all the committed but not applied entries
+func (l *RaftLog) nextEnts() (ents []pb.Entry) {
+	return l.entries[l.committed:]
+}
+
+// return a slice of log entries start at index i.
+func (l *RaftLog) sliceEntsStartAt(i uint64) (ents []pb.Entry) {
+	if i > l.LastIndex() {
+		return nil
+	}
+
+	last_snapshot, err := l.storage.Snapshot()
+	if err == nil {
+		if i <= last_snapshot.Metadata.Index {
+			return nil
+		}
+	}
+
+	// TODO: Ensure the log entries are continuous.
+	for _, entry := range l.entries {
+		if entry.Index >= i {
+			ents = append(ents, entry)
+		}
+	}
+
+	return
+}
+
+// return the length of l.entries excluding the dummy entry.
+func (l *RaftLog) LenUnCompacted() int {
+	return len(l.entries) - 1
+}
+
+// LastIndex return the last index of the log entries
+func (l *RaftLog) LastIndex() uint64 {
+	n := len(l.entries)
+	if n > 0 {
+		return l.entries[n-1].Index
+	}
+	// note, LastIndex always success since MemStorage has appended a dummy entry while init.
+	// and if there's a snapshot, the dummy entry's index is set to the index of the last entry
+	// in the snapshot.
+	li, _ := l.storage.LastIndex()
+	return li
+}
+
+// Term return the term of the entry in the given index
+func (l *RaftLog) Term(i uint64) (uint64, error) {
+	if i > l.LastIndex() {
+		return 0, ErrUnavailable
+	}
+
+	var term uint64
+	snapshot_index := uint64(0)
+	last_snapshot, err := l.storage.Snapshot()
+	if err == nil {
+		snapshot_index = last_snapshot.Metadata.Index
+		if i < snapshot_index {
+			// ErrSnapOutOfDate says the requested entry at the given index is older than the existing snapshot
+			// and so cannot be reached.
+			return 0, ErrSnapOutOfDate
+		} else if i == snapshot_index {
+			term = last_snapshot.Metadata.Term
+			return term, nil
+		}
+	}
+
+	offset := int(i - snapshot_index)
+	if offset < len(l.entries) {
+		term = l.entries[offset].Term
+		return term, nil
+	}
+
+	return 0, ErrUnavailable
 }
 
 // We need to compact the log entries in some point of time like
@@ -72,28 +166,4 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
-}
-
-// unstableEntries return all the unstable entries
-func (l *RaftLog) unstableEntries() []pb.Entry {
-	// Your Code Here (2A).
-	return nil
-}
-
-// nextEnts returns all the committed but not applied entries
-func (l *RaftLog) nextEnts() (ents []pb.Entry) {
-	// Your Code Here (2A).
-	return nil
-}
-
-// LastIndex return the last index of the log entries
-func (l *RaftLog) LastIndex() uint64 {
-	// Your Code Here (2A).
-	return 0
-}
-
-// Term return the term of the entry in the given index
-func (l *RaftLog) Term(i uint64) (uint64, error) {
-	// Your Code Here (2A).
-	return 0, nil
 }

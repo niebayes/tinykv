@@ -27,11 +27,3 @@ func (r *Raft) handleMsgHup(msg pb.Message) {
 func (r *Raft) handleBeat(msg pb.Message) {
 	r.bcastHeartbeat()
 }
-
-// handle MsgPropose message.
-func (r *Raft) handlePropose(msg pb.Message) {
-	r.appendEntries(msg.Entries)
-	if r.State == StateLeader {
-		r.bcastAppendEntries()
-	}
-}

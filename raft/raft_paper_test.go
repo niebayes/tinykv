@@ -887,6 +887,7 @@ func (s messageSlice) Len() int           { return len(s) }
 func (s messageSlice) Less(i, j int) bool { return fmt.Sprint(s[i]) < fmt.Sprint(s[j]) }
 func (s messageSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
+// make the cluster commit a no-op entry.
 func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	if r.State != StateLeader {
 		panic("it should only be used when it is the leader")
@@ -896,6 +897,7 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 			continue
 		}
 
+		// sendAppend will send a no-op entry is there're no new entries.
 		r.sendAppend(id)
 	}
 	// simulate the response of MessageType_MsgAppend
@@ -904,15 +906,21 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 		if m.MsgType != pb.MessageType_MsgAppend || len(m.Entries) != 1 || m.Entries[0].Data != nil {
 			panic("not a message to append noop entry")
 		}
+		// send MsgAppendResponse to the leader.
 		r.Step(acceptAndReply(m))
 	}
-	// ignore further messages to refresh followers' commit index
+	// ignore further messages to refresh followers' commit index. 
+	// i.e. these messages are used to notify followers that this no-op entry is committed by the leader.
 	r.readMessages()
+
+	// all unstable entries are stable now.
 	s.Append(r.RaftLog.unstableEntries())
+	// since it's no-op, the upper application does not need to execute it, so applied = committed.
 	r.RaftLog.applied = r.RaftLog.committed
 	r.RaftLog.stabled = r.RaftLog.LastIndex()
 }
 
+// accept and append all entries conveyed in the message.
 func acceptAndReply(m pb.Message) pb.Message {
 	if m.MsgType != pb.MessageType_MsgAppend {
 		panic("type should be MessageType_MsgAppend")
