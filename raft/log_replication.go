@@ -48,8 +48,8 @@ func (r *Raft) bcastAppendEntries() {
 
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
+	// drop stale msgs.
 	if m.Term < r.Term {
-		// drop stale msgs.
 		return
 	}
 
@@ -138,36 +138,70 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 }
 
 // handle AppendEntries RPC response.
-func (r *Raft) handleAppendEntriesResponse(res pb.Message) {
+func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
+	// drop stale msgs.
+	if m.Term < r.Term {
+		return
+	}
+
 	// step down if I'm stale.
-	if res.Term > r.Term {
-		r.becomeFollower(res.Term, res.From)
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, m.From)
 		return
 	}
 
-	// only leader is responsible to process AppendEntries response.
-	if r.State != StateLeader {
-		return
-	}
-
-	prs, ok := r.Prs[res.From]
-	// if the leader thought this peers goes down for some reason, drop this message.
+	prs, ok := r.Prs[m.From]
 	if !ok {
 		return
 	}
 
-	// Reject = true if log consistency check fails
-	if res.Reject {
-		// TODO
+	if m.Reject {
+		switch m.Reason {
+		case pb.RejectReason_IndexConflict:
+			prs.Next = m.NextIndex
+		case pb.RejectReason_TermConflict:
+			// first search the log with the conflict term.
+			l := r.RaftLog
+			found := false
+			for i := 1; i < int(l.Len()); i++ {
+				// note, there's a dummy entry at the head.
+				ent := l.entries[i]
+				if ent.Term == m.ConflictTerm {
+					found = true
+					// the next set of entries sent to the follower will skip all logs with the conflict term.
+					prs.Next = ent.Index + 1
+					for _, ent = range l.entries[i+1:] {
+						if ent.Index != m.ConflictTerm {
+							prs.Next = ent.Index
+							break
+						}
+					}
+				}
+			}
+
+			if !found {
+				// if not found, nothing to skip.
+				// the only thing leader can do is to accept the suggestion from the server and try again.
+				prs.Next = m.NextIndex
+			}
+		default:
+			panic("unknown reject reason")
+		}
+		// to ensure the next index does not go below 1.
+		prs.Next = max(prs.Next, 1)
+
+		// TODO: immediately send AppendEntries RPC to the peer.
+
 	} else {
-		prs.Next = prs.Next + uint64(len(res.Entries))
+		prs.Next = max(prs.Next, m.NextIndex)
+		prs.Match = prs.Next - 1
 	}
 
-	// update the peer's progress in the leader's view.
-	prs.Match = prs.Next - 1
-
 	// if a majority of followers has not rejected the entries, the entries are committed in the leader.
-	r.maybeUpdateCommitIndex()
+	if r.maybeUpdateCommitIndex() {
+		// if the commit index is updated, immediately broadcast AppendEntries RPC to notify the followers ASAP.
+		r.bcastAppendEntries()
+	}
 }
 
 func (r *Raft) bcastHeartbeat() {
@@ -278,7 +312,7 @@ func (r *Raft) agreedWithMajority(index uint64) bool {
 	return 2*cnt > len(r.peers)
 }
 
-func (r *Raft) maybeUpdateCommitIndex() {
+func (r *Raft) maybeUpdateCommitIndex() bool {
 	for index := r.RaftLog.LastIndex(); index > r.RaftLog.committed; index-- {
 		// only commit entries at the current term.
 		if r.RaftLog.entries[index].Term != r.Term {
@@ -286,9 +320,10 @@ func (r *Raft) maybeUpdateCommitIndex() {
 		}
 		if r.agreedWithMajority(index) {
 			r.RaftLog.committed = index
-			break
+			return true
 		}
 	}
+	return false
 }
 
 func (r *Raft) appendEntries(entries []*pb.Entry) {
