@@ -193,6 +193,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		// TODO: immediately send AppendEntries RPC to the peer.
 
 	} else {
+		prs.Next = max(prs.Next, m.Index+1) // the test suites are creepy.
 		prs.Next = max(prs.Next, m.NextIndex)
 		prs.Match = prs.Next - 1
 	}
@@ -349,26 +350,28 @@ func (r *Raft) makeEntries(to uint64) []*pb.Entry {
 // the leader sends each peer in the cluster except itself the log entries it thinks they need
 // according to each peer's progress.
 func (r *Raft) makeAppendEntries(to uint64) pb.Message {
-	entries := r.makeEntries(to)
+	l := r.RaftLog
+	ents := r.makeEntries(to)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		Entries: entries,
+		Commit:  l.committed,
+		Entries: ents,
+	}
+	if len(ents) > 0 {
+		prevLog, err := l.Entry(ents[0].Index - 1)
+		if err == nil {
+			msg.Index = prevLog.Index
+			msg.LogTerm = prevLog.Term
+		}
 	}
 	return msg
 }
 
 func (r *Raft) sendAppend(to uint64) bool {
-	msg := r.makeAppendEntriesNoop(to)
-	// only for test purpose: update nextIndex optimistically.
-	// prs, ok := r.Prs[to]
-	// if !ok {
-	// 	panic("send to unknown peer")
-	// }
-	// prs.Next = prs.Next + uint64(len(msg.Entries))
-	r.forwardMsgUp(msg)
+	r.sendAppendEntries(to)
 	return true
 }
 
@@ -376,7 +379,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppendEntries(to uint64) bool {
 	msg := r.makeAppendEntries(to)
-	r.msgs = append(r.msgs, msg)
+	r.forwardMsgUp(msg)
 	return true
 }
 

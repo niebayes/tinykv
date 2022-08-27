@@ -167,7 +167,7 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 	// upon becoming a new leader, broadcast a no-op entry to claim the leadership
 	// and keep other nodes' log in sync.
-	r.bcastAppendEntriesNoop()
+	r.appendEntries(r.makeNoopEntry())
 }
 
 // upon becoming a new leader, broadcast a no-op entry to claim the leadership

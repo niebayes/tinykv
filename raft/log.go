@@ -80,7 +80,7 @@ func newLog(storage Storage) *RaftLog {
 		storage:           storage,
 		committed:         0,
 		applied:           0,
-		stabled:           0,
+		stabled:           1, // no there's a dummy entry.
 		lastIncludedIndex: 0,
 		// append a dummy entry while init to simplify log indexing.
 		entries:         make([]pb.Entry, 1),
@@ -91,12 +91,15 @@ func newLog(storage Storage) *RaftLog {
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
-	return l.entries[l.stabled:]
+	offset := l.idx2off(l.stabled + 1)
+	return l.entries[offset:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
-	return l.entries[l.committed:]
+	begin := l.idx2off(l.applied + 1)
+	end := l.idx2off(l.committed)
+	return l.entries[begin:end]
 }
 
 // return a slice of log entries start at index i.
@@ -122,22 +125,9 @@ func (l *RaftLog) sliceEntsStartAt(i uint64) (ents []pb.Entry) {
 	return
 }
 
-// return the length of l.entries excluding the dummy entry.
-func (l *RaftLog) LenUnCompacted() int {
-	return len(l.entries) - 1
-}
-
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
-	n := len(l.entries)
-	if n > 0 {
-		return l.entries[n-1].Index
-	}
-	// note, LastIndex always success since MemStorage has appended a dummy entry while init.
-	// and if there's a snapshot, the dummy entry's index is set to the index of the last entry
-	// in the snapshot.
-	li, _ := l.storage.LastIndex()
-	return li
+	return max(l.entries[len(l.entries)-1].Index, l.lastIncludedIndex)
 }
 
 // transform log index to offset in the entries array.
@@ -145,7 +135,6 @@ func (l *RaftLog) idx2off(index uint64) uint64 {
 	if index < 1 {
 		panic(ErrIndexOutOfRange)
 	}
-
 	// note, there's a dummy entry at the head of entries.
 	offset := index - l.lastIncludedIndex
 	return offset
@@ -158,6 +147,9 @@ func (l *RaftLog) Len() uint64 {
 
 // return (entry, nil) where the entry is the entry at index index if the entry exists. Otherwise, return (nil, error)
 func (l *RaftLog) Entry(index uint64) (*pb.Entry, error) {
+	if index < 1 {
+		return nil, ErrIndexOutOfRange
+	}
 	offset := l.idx2off(index)
 	if offset > l.Len() {
 		return nil, ErrIndexOutOfRange
