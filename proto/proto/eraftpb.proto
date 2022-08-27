@@ -70,6 +70,11 @@ enum MessageType {
     MsgTimeoutNow = 12;
 }
 
+enum RejectReason {
+    TermConflict = 0;
+    IndexConflict = 1;
+}
+
 message Message {
     MessageType msg_type = 1;
     uint64 to = 2;
@@ -83,6 +88,9 @@ message Message {
     // in leader election: true if from node has rejected to grant the vote.
     // in log replication: true if from node has rejected to append entries.
     bool reject = 10;
+    RejectReason reason = 11;
+    uint64 next_index = 12;
+    uint64 conflict_term = 13;
 }
 
 // HardState contains the state of a node need to be peristed, including the current term, commit index 

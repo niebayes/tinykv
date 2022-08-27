@@ -888,6 +888,9 @@ func (s messageSlice) Less(i, j int) bool { return fmt.Sprint(s[i]) < fmt.Sprint
 func (s messageSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
 // make the cluster commit a no-op entry.
+// note, this function is called only adjacent to becomeLeader. 
+// the test suites assume that our implementation of becomeLeader append a no-op entry 
+// to the raft log.
 func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	if r.State != StateLeader {
 		panic("it should only be used when it is the leader")
@@ -897,7 +900,7 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 			continue
 		}
 
-		// sendAppend will send a no-op entry is there're no new entries.
+		// sendAppend will send a no-op entry if there're no new entries.
 		r.sendAppend(id)
 	}
 	// simulate the response of MessageType_MsgAppend
@@ -932,5 +935,7 @@ func acceptAndReply(m pb.Message) pb.Message {
 		Term:    m.Term,
 		MsgType: pb.MessageType_MsgAppendResponse,
 		Index:   m.Index + uint64(len(m.Entries)),
+		// FIXME: This is my modification.
+		// Entries: m.Entries,
 	}
 }

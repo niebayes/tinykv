@@ -210,11 +210,6 @@ func (r *Raft) tickHeartbeat() {
 //
 
 func (r *Raft) Step(msg pb.Message) error {
-	// drop all stale msgs.
-	if msg.Term < r.Term {
-		return nil
-	}
-
 	switch r.State {
 	case StateFollower:
 		r.stepFollower(msg)

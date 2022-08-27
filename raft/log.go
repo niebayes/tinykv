@@ -36,6 +36,13 @@ import (
 // note, stable != commited. Even if log entries are persisted, they may not be committed yet
 // and even may be discarded.
 
+import (
+	"errors"
+)
+
+var ErrIndexOutOfRange error = errors.New("index out of range")
+var ErrDiscardCommitted error = errors.New("discarding committed entries")
+
 type RaftLog struct {
 	// storage contains all stable entries since the last snapshot.
 	storage Storage
@@ -55,6 +62,8 @@ type RaftLog struct {
 	// Everytime handling `Ready`, the unstabled logs will be included.
 	stabled uint64
 
+	lastIncludedIndex uint64
+
 	// all entries that have not yet compact, i.e. not snapshoted.
 	// entries = stable log entries + unstable log entries.
 	entries []pb.Entry
@@ -68,13 +77,13 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	raft_log := &RaftLog{
-		storage:   storage,
-		committed: 0,
-		applied:   0,
-		stabled:   0,
-		// FIXME: Shall I append a dummy entry?
-		// append a dummy entry while init to simplify log processing and indexing.
-		entries:         make([]pb.Entry, 0),
+		storage:           storage,
+		committed:         0,
+		applied:           0,
+		stabled:           0,
+		lastIncludedIndex: 0,
+		// append a dummy entry while init to simplify log indexing.
+		entries:         make([]pb.Entry, 1),
 		pendingSnapshot: &pb.Snapshot{},
 	}
 	return raft_log
@@ -131,6 +140,31 @@ func (l *RaftLog) LastIndex() uint64 {
 	return li
 }
 
+// transform log index to offset in the entries array.
+func (l *RaftLog) idx2off(index uint64) uint64 {
+	if index < 1 {
+		panic(ErrIndexOutOfRange)
+	}
+
+	// note, there's a dummy entry at the head of entries.
+	offset := index - l.lastIncludedIndex
+	return offset
+}
+
+// return the length of log entries including the dummy entry.
+func (l *RaftLog) Len() uint64 {
+	return uint64(len(l.entries))
+}
+
+// return (entry, nil) where the entry is the entry at index index if the entry exists. Otherwise, return (nil, error)
+func (l *RaftLog) Entry(index uint64) (*pb.Entry, error) {
+	offset := l.idx2off(index)
+	if offset > l.Len() {
+		return nil, ErrIndexOutOfRange
+	}
+	return &l.entries[offset], nil
+}
+
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i > l.LastIndex() {
@@ -159,6 +193,30 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	}
 
 	return 0, ErrUnavailable
+}
+
+// append the actually new entries that I don't have.
+// if all entries are stale or conflicting, return 0.
+// otherwise, return the index of last new entry.
+func (l *RaftLog) appendNewEntries(nents []*pb.Entry) uint64 {
+	// since followers simply duplicate the leader's log,
+	// and hence if an existing entry conflicts with the entries received from the leader,
+	// delete the conflicting entry and all entries follow it in followers.
+	for i := 0; i < len(nents); i++ {
+		nent := nents[i]                // leader's entry.
+		ent, err := l.Entry(nent.Index) // my entry.
+		// all entris before the conflict entry were appended to my log.
+		// all entries after and including the conflict entry needs to be appended to my log;
+		if err != nil || ent.Term != nent.Term {
+			if ent.Index <= l.committed {
+				panic(ErrDiscardCommitted)
+			}
+			for _, nent := range nents[i:] {
+				l.entries = append(l.entries, *nent)
+			}
+		}
+	}
+	return 0
 }
 
 // We need to compact the log entries in some point of time like

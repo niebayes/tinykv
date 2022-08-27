@@ -151,9 +151,6 @@ func (r *Raft) handleRequestVoteResponse(res pb.Message) {
 	// a majority of nodes in the cluster support me, I become the new leader.
 	if 2*num_supports > len(r.peers) {
 		r.becomeLeader()
-		// upon becoming a new leader, broadcast a no-op entry to claim the leadership
-		// and keep other nodes' log in sync.
-		r.bcastAppendEntriesNoop()
 		return
 	}
 
@@ -168,10 +165,14 @@ func (r *Raft) becomeLeader() {
 	r.resetVoteRecord()
 	r.resetPeerProgress()
 	r.State = StateLeader
+	// upon becoming a new leader, broadcast a no-op entry to claim the leadership
+	// and keep other nodes' log in sync.
+	r.bcastAppendEntriesNoop()
 }
 
 // upon becoming a new leader, broadcast a no-op entry to claim the leadership
 // and keep other servers' log in sync.
+// FIXME: Shall I wrap sending no-op entry into sending normal entires?
 func (r *Raft) bcastAppendEntriesNoop() {
 	for _, to := range r.peers {
 		// skip myself.

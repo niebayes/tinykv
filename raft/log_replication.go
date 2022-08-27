@@ -29,7 +29,7 @@ var TermConflict uint64 = math.MaxUint64
 // handle MsgPropose message.
 func (r *Raft) handlePropose(msg pb.Message) {
 	r.mustAppendEntries(msg.Entries)
-	// followers will drop this msg.
+	// followers will drop this msg. (Possibly they will redirect it to the leader)
 	// candidates only append entries.
 	// leader append entries and broadcast them out.
 	if r.State == StateLeader {
@@ -37,82 +37,100 @@ func (r *Raft) handlePropose(msg pb.Message) {
 	}
 }
 
+// broadcast AppendEntries RPCs to all peers (except me) the leader thinks it's alive
 func (r *Raft) bcastAppendEntries() {
 	for _, to := range r.peers {
 		if to != r.id {
-			r.sendAppend(to)
+			r.sendAppendEntries(to)
 		}
 	}
 }
 
 // handleAppendEntries handle AppendEntries RPC request
-func (r *Raft) handleAppendEntries(req pb.Message) {
-	// note, stale msgs are dropped in Step.
+func (r *Raft) handleAppendEntries(m pb.Message) {
+	if m.Term < r.Term {
+		// drop stale msgs.
+		return
+	}
 
 	// since this msg is not dropped, I admit the from node is the current leader,
 	// so I step down and reset election timer to not compete with him.
-	r.becomeFollower(req.Term, req.From)
+	r.becomeFollower(m.Term, m.From)
 	r.resetElectionTimer()
 
 	// Index and LogTerm in AppendEntries msg are interpreted as prevLogIndex and prevLogTerm in raft paper.
-	prevLogIndex := req.Index
-	prevLogTerm := req.LogTerm
+	prevLogIndex := m.Index
+	prevLogTerm := m.LogTerm
+	l := r.RaftLog
 
-	reject := true
+	// log consistency check: log has an entry at index prevLogIndex and with the same term.
+	ent, err := l.Entry(prevLogIndex)
+	if err != nil {
+		// my log does not have a entry at the index prevLogIndex, and hence index conflicts.
+		// I don't have an entry at index prevLogIndex and I even don't know whether I have entries
+		// with indexes < prevLogIndex. So the only hint I can give to the leader is the index
+		// of the last entry in my log. Hopefully, the next set of entries the leader gives to me
+		// start from (last index + 1), which are the entries what I'm missing right now.
+		r.forwardMsgUp(pb.Message{
+			MsgType:   pb.MessageType_MsgAppendResponse,
+			To:        m.From,
+			From:      r.id,
+			Index:     prevLogIndex, // to indicate it's which MsgAppend was rejected.
+			Reject:    true,
+			Reason:    pb.RejectReason_IndexConflict,
+			NextIndex: l.LastIndex() + 1,
+		})
+		return
 
-	ok, nextIndex, conflictTerm := r.logConsistencyCheck(prevLogIndex, prevLogTerm)
-	if ok {
-		reject = false
-
-		// since followers simply duplicate the leader's log,
-		// and hence if an existing entry conflicts with the entries received from the leader,
-		// delete the conflicting entry and all entries follow it in followers.
-
-		hasConflict := false
-		for li, leadEntry := range req.Entries {
-			for mi, myEntry := range r.RaftLog.entries {
-				// a conflicting entry is such an entry with the same index but with different term.
-				if leadEntry.Index == myEntry.Index && leadEntry.Term != myEntry.Term {
-					// TODO
-					// committed entries never get discarded.
-					// if mi < int(r.RaftLog.committed) {
-					// 	mi = int(r.RaftLog.committed)
-					// }
-
-					// discard conflicting entry and ones follow it, and then append.
-					r.RaftLog.entries = r.RaftLog.entries[:mi]
-					r.appendEntries(req.Entries[li:])
-					hasConflict = true
-				}
+	} else if ent.Term != prevLogTerm {
+		// my log has an entry at the index prevLogIndex but with a different term, and hence term conflicts.
+		// this is because I have appended some entries during the conflict term,
+		// and it turns out that I shall not append those entries and all entris appended during the
+		// conflict term must be discarded.
+		// so I suggest the leader the next set of entries you give me shall be the entries
+		// that the first entry's term is not the conflict term.
+		nextIndex := prevLogIndex
+		conflictTerm := ent.Term
+		for index := prevLogIndex - 1; index > l.lastIncludedIndex; index-- {
+			ent, err = l.Entry(index)
+			if err != nil || ent.Term != conflictTerm {
+				break
 			}
+			nextIndex--
 		}
 
-		// no conflict, append all.
-		if !hasConflict {
-			r.appendEntries(req.Entries)
-		}
+		r.forwardMsgUp(pb.Message{
+			MsgType:      pb.MessageType_MsgAppendResponse,
+			To:           m.From,
+			From:         r.id,
+			Index:        prevLogIndex, // to indicate it's which MsgAppend was rejected.
+			Reject:       true,
+			Reason:       pb.RejectReason_TermConflict,
+			NextIndex:    nextIndex,
+			ConflictTerm: conflictTerm,
+		})
+		return
 	}
+
+	// the new entries are not rejected if passed the log consistency check.
+	// but some of them may be stale, some of them may have conflict,
+	// so I have to skip conflicts and append the actually new entries which I don't have.
+	lastNewEntryIndex := l.appendNewEntries(m.Entries)
 
 	// update commit index.
-	if req.Commit > r.RaftLog.committed {
-		// commit index cannot go over the index of the last entry in this node.
-		r.RaftLog.committed = min(req.Commit, r.RaftLog.LastIndex())
+	if m.Commit > l.committed {
+		// committed entries must be those entries that I have
+		l.committed = min(m.Commit, lastNewEntryIndex)
 	}
 
-	// construct the response.
-	res := pb.Message{
-		MsgType: pb.MessageType_MsgAppendResponse,
-		To:      req.From,
-		From:    r.id,
-		Index:   nextIndex,
-		LogTerm: conflictTerm,
-		// forward back the entries to let the leader know it's these entries are rejected or not rejected.
-		Entries: req.Entries,
-		Reject:  reject,
-	}
-
-	// send the response.
-	r.forwardMsgUp(res)
+	r.forwardMsgUp(pb.Message{
+		MsgType:   pb.MessageType_MsgAppendResponse,
+		To:        m.From,
+		From:      r.id,
+		Index:     lastNewEntryIndex, // used for leader to update the peer's Next. Only used in test suites.
+		Reject:    false,
+		NextIndex: lastNewEntryIndex + 1,
+	})
 
 	// it might take a long time to append and persist logs,
 	// so reset timer again to make the system more robust.
@@ -204,8 +222,12 @@ func (r *Raft) handleHeartbeatResponse(res pb.Message) {
 // the entries ents are appended whatsoever.
 // generally called when raft module receives new log entries from the upper application.
 func (r *Raft) mustAppendEntries(ents []*pb.Entry) {
-	for _, entry := range ents {
-		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
+	li := r.RaftLog.LastIndex()
+	for i := 0; i < len(ents); i++ {
+		entry := *ents[i]
+		entry.Index = li + uint64(i) + 1
+		entry.Term = r.Term
+		r.RaftLog.entries = append(r.RaftLog.entries, entry)
 	}
 }
 
@@ -213,14 +235,12 @@ func (r *Raft) mustAppendEntries(ents []*pb.Entry) {
 // otherwise, the leader's log and the follower's log would be inconsistent if appended these entries.
 // return (false, nextIndex, conflictTerm) if not pass the consistency check.
 // return (true, 0, 0) if pass the consistency check.
-func (r *Raft) logConsistencyCheck(prevLogIndex, prevLogTerm uint64) (ok bool, nextIndex uint64, conflictTerm uint64) {
+func (r *Raft) checkLogConsistency(prevLogIndex, prevLogTerm uint64) (ok bool, nextIndex uint64, conflictTerm uint64) {
 	// empty logs are always consistent no matter of what log this server has.
 	// since this server simply duplicates leader's log by discarding any conflict logs.
 	if prevLogIndex == 0 {
 		return true, 0, 0
 	}
-
-	// TODO: Add snapshot related logic.
 
 	// index conflicts. If accept this AENT, it leaves a hole in this node's log.
 	if r.RaftLog.LastIndex() < prevLogIndex {
@@ -305,9 +325,21 @@ func (r *Raft) makeAppendEntries(to uint64) pb.Message {
 	return msg
 }
 
+func (r *Raft) sendAppend(to uint64) bool {
+	msg := r.makeAppendEntriesNoop(to)
+	// only for test purpose: update nextIndex optimistically.
+	// prs, ok := r.Prs[to]
+	// if !ok {
+	// 	panic("send to unknown peer")
+	// }
+	// prs.Next = prs.Next + uint64(len(msg.Entries))
+	r.forwardMsgUp(msg)
+	return true
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppend(to uint64) bool {
+func (r *Raft) sendAppendEntries(to uint64) bool {
 	msg := r.makeAppendEntries(to)
 	r.msgs = append(r.msgs, msg)
 	return true
