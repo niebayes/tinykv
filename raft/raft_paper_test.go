@@ -478,6 +478,7 @@ func TestLeaderAcknowledgeCommit2AB(t *testing.T) {
 // TestLeaderCommitPrecedingEntries tests that when leader commits a log entry,
 // it also commits all preceding entries in the leader’s log, including
 // entries created by previous leaders.
+// FIXME: The sentence below is confusing and maybe incorrect.
 // Also, it applies the entry to its local state machine (in log order).
 // Reference: section 5.3
 func TestLeaderCommitPrecedingEntries2AB(t *testing.T) {
@@ -509,7 +510,9 @@ func TestLeaderCommitPrecedingEntries2AB(t *testing.T) {
 }
 
 // TestFollowerCommitEntry tests that once a follower learns that a log entry
-// is committed, it applies the entry to its local state machine (in log order).
+// is committed,
+// FIXME: The sentence below is confusing and maybe incorrect.
+// it applies the entry to its local state machine (in log order).
 // Reference: section 5.3
 func TestFollowerCommitEntry2AB(t *testing.T) {
 	tests := []struct {
@@ -612,6 +615,7 @@ func TestFollowerCheckMessageType_MsgAppend2AB(t *testing.T) {
 // TestFollowerAppendEntries tests that when AppendEntries RPC is valid,
 // the follower will delete the existing conflict entry and all that follow it,
 // and append any new entries not already in the log.
+// FIXME: The sentence below is confusing and maybe incorrect.
 // Also, it writes the new entry into stable storage.
 // Reference: section 5.3
 func TestFollowerAppendEntries2AB(t *testing.T) {
@@ -659,7 +663,7 @@ func TestFollowerAppendEntries2AB(t *testing.T) {
 		for _, ent := range tt.wents {
 			wents = append(wents, *ent)
 		}
-		if g := r.RaftLog.entries; !reflect.DeepEqual(g, wents) {
+		if g := r.RaftLog.allEntries(); !reflect.DeepEqual(g, wents) {
 			t.Errorf("#%d: ents = %+v, want %+v", i, g, wents)
 		}
 		var wunstable []pb.Entry
@@ -888,8 +892,8 @@ func (s messageSlice) Less(i, j int) bool { return fmt.Sprint(s[i]) < fmt.Sprint
 func (s messageSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
 // make the cluster commit a no-op entry.
-// note, this function is called only adjacent to becomeLeader. 
-// the test suites assume that our implementation of becomeLeader append a no-op entry 
+// note, this function is called only adjacent to becomeLeader.
+// the test suites assume that our implementation of becomeLeader append a no-op entry
 // to the raft log.
 func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	if r.State != StateLeader {
@@ -912,7 +916,7 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 		// send MsgAppendResponse to the leader.
 		r.Step(acceptAndReply(m))
 	}
-	// ignore further messages to refresh followers' commit index. 
+	// ignore further messages to refresh followers' commit index.
 	// i.e. these messages are used to notify followers that this no-op entry is committed by the leader.
 	r.readMessages()
 

@@ -151,6 +151,9 @@ func (r *Raft) handleRequestVoteResponse(res pb.Message) {
 	// a majority of nodes in the cluster support me, I become the new leader.
 	if 2*num_supports > len(r.peers) {
 		r.becomeLeader()
+		// immediately broadcast a no-op entry to advocate my leadership and
+		// make followers catch up quickly.
+		r.bcastAppendEntriesNoop()
 		return
 	}
 
@@ -235,14 +238,33 @@ func (r *Raft) makeNoopEntry() []*pb.Entry {
 	return noop_entry
 }
 
+// FIXME: wrap sendAppendEntriesNoop and sendAppendEntries into one method.
 func (r *Raft) makeAppendEntriesNoop(to uint64) pb.Message {
+	var prevLogIndex, prevLogTerm uint64 = 0, 0
+	prs := r.Prs[to]
+	l := r.RaftLog
+
+	prevLogIndex = min(prs.Next-1, l.LastIndex())
+	prevEntry, err := l.Entry(prevLogIndex)
+	if err != nil {
+		prevLogTerm = prevEntry.Term
+	}
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		Entries: r.makeNoopEntry(),
+		Index:   prevLogIndex,
+		LogTerm: prevLogTerm,
+		Commit:  l.committed,
 	}
+
+	ents := l.sliceEntsStartAt(prs.Next)
+	msg.Entries = make([]*pb.Entry, 0)
+	for _, ent := range ents {
+		msg.Entries = append(msg.Entries, &ent)
+	}
+
 	return msg
 }
 

@@ -33,6 +33,8 @@ func (r *Raft) handlePropose(msg pb.Message) {
 	// candidates only append entries.
 	// leader append entries and broadcast them out.
 	if r.State == StateLeader {
+		// if there's only one node in the cluster, each MsgPropose would drive the update of the commit index.
+		r.maybeUpdateCommitIndex()
 		r.bcastAppendEntries()
 	}
 }
@@ -64,52 +66,57 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	l := r.RaftLog
 
 	// log consistency check: log has an entry at index prevLogIndex and with the same term.
-	ent, err := l.Entry(prevLogIndex)
-	if err != nil {
-		// my log does not have a entry at the index prevLogIndex, and hence index conflicts.
-		// I don't have an entry at index prevLogIndex and I even don't know whether I have entries
-		// with indexes < prevLogIndex. So the only hint I can give to the leader is the index
-		// of the last entry in my log. Hopefully, the next set of entries the leader gives to me
-		// start from (last index + 1), which are the entries what I'm missing right now.
-		r.forwardMsgUp(pb.Message{
-			MsgType:   pb.MessageType_MsgAppendResponse,
-			To:        m.From,
-			From:      r.id,
-			Index:     prevLogIndex, // to indicate it's which MsgAppend was rejected.
-			Reject:    true,
-			Reason:    pb.RejectReason_IndexConflict,
-			NextIndex: l.LastIndex() + 1,
-		})
-		return
+	// log consistency check only functions when prevLogIndex > 0.
+	if prevLogIndex > 0 {
+		ent, err := l.Entry(prevLogIndex)
+		if err != nil {
+			// my log does not have a entry at the index prevLogIndex, and hence index conflicts.
+			// I don't have an entry at index prevLogIndex and I even don't know whether I have entries
+			// with indexes < prevLogIndex. So the only hint I can give to the leader is the index
+			// of the last entry in my log. Hopefully, the next set of entries the leader gives to me
+			// start from (last index + 1), which are the entries what I'm missing right now.
+			r.forwardMsgUp(pb.Message{
+				MsgType:   pb.MessageType_MsgAppendResponse,
+				To:        m.From,
+				From:      r.id,
+				Term:      r.Term,
+				Index:     prevLogIndex, // to indicate it's which MsgAppend was rejected.
+				Reject:    true,
+				Reason:    pb.RejectReason_IndexConflict,
+				NextIndex: l.LastIndex() + 1,
+			})
+			return
 
-	} else if ent.Term != prevLogTerm {
-		// my log has an entry at the index prevLogIndex but with a different term, and hence term conflicts.
-		// this is because I have appended some entries during the conflict term,
-		// and it turns out that I shall not append those entries and all entris appended during the
-		// conflict term must be discarded.
-		// so I suggest the leader the next set of entries you give me shall be the entries
-		// that the first entry's term is not the conflict term.
-		nextIndex := prevLogIndex
-		conflictTerm := ent.Term
-		for index := prevLogIndex - 1; index > l.lastIncludedIndex; index-- {
-			ent, err = l.Entry(index)
-			if err != nil || ent.Term != conflictTerm {
-				break
+		} else if ent.Term != prevLogTerm {
+			// my log has an entry at the index prevLogIndex but with a different term, and hence term conflicts.
+			// this is because I have appended some entries during the conflict term,
+			// and it turns out that I shall not append those entries and all entris appended during the
+			// conflict term must be discarded.
+			// so I suggest the leader the next set of entries you give me shall be the entries
+			// that the first entry's term is not the conflict term.
+			nextIndex := prevLogIndex
+			conflictTerm := ent.Term
+			for index := prevLogIndex - 1; index > l.lastIncludedIndex; index-- {
+				ent, err = l.Entry(index)
+				if err != nil || ent.Term != conflictTerm {
+					break
+				}
+				nextIndex--
 			}
-			nextIndex--
-		}
 
-		r.forwardMsgUp(pb.Message{
-			MsgType:      pb.MessageType_MsgAppendResponse,
-			To:           m.From,
-			From:         r.id,
-			Index:        prevLogIndex, // to indicate it's which MsgAppend was rejected.
-			Reject:       true,
-			Reason:       pb.RejectReason_TermConflict,
-			NextIndex:    nextIndex,
-			ConflictTerm: conflictTerm,
-		})
-		return
+			r.forwardMsgUp(pb.Message{
+				MsgType:      pb.MessageType_MsgAppendResponse,
+				To:           m.From,
+				From:         r.id,
+				Term:         r.Term,
+				Index:        prevLogIndex, // to indicate it's which MsgAppend was rejected.
+				Reject:       true,
+				Reason:       pb.RejectReason_TermConflict,
+				NextIndex:    nextIndex,
+				ConflictTerm: conflictTerm,
+			})
+			return
+		}
 	}
 
 	// the new entries are not rejected if passed the log consistency check.
@@ -123,10 +130,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		l.committed = min(m.Commit, lastNewEntryIndex)
 	}
 
+	// update stable index.
+	// l.stabled = max(l.stabled, lastNewEntryIndex)
+
 	r.forwardMsgUp(pb.Message{
 		MsgType:   pb.MessageType_MsgAppendResponse,
 		To:        m.From,
 		From:      r.id,
+		Term:      r.Term,
 		Index:     lastNewEntryIndex, // used for leader to update the peer's Next. Only used in test suites.
 		Reject:    false,
 		NextIndex: lastNewEntryIndex + 1,
@@ -266,41 +277,6 @@ func (r *Raft) mustAppendEntries(ents []*pb.Entry) {
 	}
 }
 
-// check that this node contains an entry at prevLogIndex whose term matches prevLogTerm.
-// otherwise, the leader's log and the follower's log would be inconsistent if appended these entries.
-// return (false, nextIndex, conflictTerm) if not pass the consistency check.
-// return (true, 0, 0) if pass the consistency check.
-func (r *Raft) checkLogConsistency(prevLogIndex, prevLogTerm uint64) (ok bool, nextIndex uint64, conflictTerm uint64) {
-	// empty logs are always consistent no matter of what log this server has.
-	// since this server simply duplicates leader's log by discarding any conflict logs.
-	if prevLogIndex == 0 {
-		return true, 0, 0
-	}
-
-	// index conflicts. If accept this AENT, it leaves a hole in this node's log.
-	if r.RaftLog.LastIndex() < prevLogIndex {
-		nextIndex = r.RaftLog.LastIndex() + 1
-		return false, nextIndex, 0
-	}
-
-	// term conflicts.
-
-	// TODO: rewrite to add snapshot related logic.
-	myTerm := r.RaftLog.entries[prevLogIndex].Term
-	if myTerm != prevLogTerm {
-		conflictTerm = myTerm
-		for index := prevLogIndex; index >= 1; index-- {
-			if r.RaftLog.entries[index].Term == conflictTerm {
-				nextIndex = index
-			} else {
-				return false, nextIndex, conflictTerm
-			}
-		}
-	}
-
-	return true, 0, 0
-}
-
 func (r *Raft) agreedWithMajority(index uint64) bool {
 	cnt := 1 // the leader has already replicated the log entry.
 	for id, prs := range r.Prs {
@@ -314,13 +290,14 @@ func (r *Raft) agreedWithMajority(index uint64) bool {
 }
 
 func (r *Raft) maybeUpdateCommitIndex() bool {
-	for index := r.RaftLog.LastIndex(); index > r.RaftLog.committed; index-- {
+	l := r.RaftLog
+	for index := l.LastIndex(); index > l.committed; index-- {
 		// only commit entries at the current term.
-		if r.RaftLog.entries[index].Term != r.Term {
+		if l.entries[index].Term != r.Term {
 			continue
 		}
 		if r.agreedWithMajority(index) {
-			r.RaftLog.committed = index
+			l.committed = index
 			return true
 		}
 	}
@@ -351,6 +328,7 @@ func (r *Raft) makeEntries(to uint64) []*pb.Entry {
 // according to each peer's progress.
 func (r *Raft) makeAppendEntries(to uint64) pb.Message {
 	l := r.RaftLog
+	// FIXME: rewrite the logic of making entries: use Prs.Next instead.
 	ents := r.makeEntries(to)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
