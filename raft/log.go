@@ -71,6 +71,9 @@ type RaftLog struct {
 	// the incoming unstable snapshot, if any.
 	// (Used in 2C)
 	pendingSnapshot *pb.Snapshot
+
+	// used for logging to access the logger in raft.
+	r *Raft
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -80,30 +83,36 @@ func newLog(storage Storage) *RaftLog {
 		storage:           storage,
 		committed:         0,
 		applied:           0,
-		stabled:           1,
 		lastIncludedIndex: 0,
 		// append a dummy entry while init to simplify log indexing.
 		entries:         make([]pb.Entry, 1),
 		pendingSnapshot: &pb.Snapshot{},
 	}
+
 	// upon init, read all persisted stable logs into the log.
 	fi, err := storage.FirstIndex()
 	li, _ := storage.LastIndex()
 	// err != nil => there's at least one entry excluding the dummy entry in the storage.
 	if err == nil {
-		prev_stable_ents, _ := storage.Entries(fi, li+1)
-		raft_log.entries = append(raft_log.entries, prev_stable_ents...)
+		stable_ents, _ := storage.Entries(fi, li+1)
+		raft_log.entries = append(raft_log.entries, stable_ents...)
+
+		raft_log.r.logger.restoreEnts(stable_ents)
 	}
 
 	// update stabled index since we may have restored some persisted entries from stable storage.
 	// note, commit index cannot be updated right now. Commit index is only updated when the leader
 	// notifies us that a quorum of nodes in the cluster has replicated these entries.
-	raft_log.stabled = max(1, raft_log.LastIndex())
+	raft_log.stabled = raft_log.LastIndex()
+
+	if raft_log.stabled != 0 {
+		raft_log.r.logger.updateStabled(0)
+	}
 
 	return raft_log
 }
 
-// return all entries not compacted yet excluding the dummy entry.
+// return all entries not compacted yet, excluding the dummy entry.
 func (l *RaftLog) allEntries() []pb.Entry {
 	return l.entries[1:]
 }
@@ -124,19 +133,13 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 }
 
 // return a slice of log entries start at index i.
-func (l *RaftLog) sliceEntsStartAt(i uint64) (ents []pb.Entry) {
+func (l *RaftLog) sliceStartAt(i uint64) []pb.Entry {
 	if i <= l.lastIncludedIndex || i > l.LastIndex() {
 		return nil
 	}
 
-	// TODO: Ensure the log entries are continuous.
-	for _, entry := range l.entries {
-		if entry.Index >= i {
-			ents = append(ents, entry)
-		}
-	}
-
-	return
+	offset := l.idx2off(i)
+	return l.entries[offset:]
 }
 
 // LastIndex return the last index of the log entries
@@ -220,15 +223,18 @@ func (l *RaftLog) appendNewEntries(nents []*pb.Entry) uint64 {
 			if ent != nil {
 				// discard conflict entry and all follow it.
 				offset := l.idx2off(ent.Index)
+				l.r.logger.discardEnts(l.entries[offset:])
 				l.entries = l.entries[:offset]
 				// some stable entries may be discarded, so update stable index.
 				l.stabled = min(l.stabled, l.LastIndex())
 			}
 
 			// append new entries.
-			for _, nent := range nents[i:] {
-				l.entries = append(l.entries, *nent)
-			}
+			nents_clone := entsClone(nents[i:])
+			l.entries = append(l.entries, nents_clone...)
+
+			l.r.logger.appendEnts(nents_clone)
+
 			return l.LastIndex()
 		}
 	}

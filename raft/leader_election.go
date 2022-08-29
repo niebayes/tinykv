@@ -24,7 +24,9 @@ import (
 )
 
 // handle MsgHup message
-func (r *Raft) handleMsgHup(msg pb.Message) {
+func (r *Raft) handleMsgHup() {
+	r.logger.recvHUP()
+
 	r.becomeCandidate()
 	// if the cluster only contain one node, this node immediately becomes the leader.
 	if len(r.peers) == 1 {
@@ -36,14 +38,16 @@ func (r *Raft) handleMsgHup(msg pb.Message) {
 }
 
 // handle MsgBeat message.
-func (r *Raft) handleBeat(msg pb.Message) {
+func (r *Raft) handleBeat() {
+	r.logger.recvBEAT()
+
 	r.bcastHeartbeat()
 }
 
 // becomeFollower transform this peer's state to Follower
-// @param term
-// @param lead the node with id lead is believed to be the current leader.
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
+	oldTerm := r.Term
+
 	// FIXME: Shall I differentiate between step down and become follower?
 	if term > r.Term {
 		r.Term = term
@@ -51,13 +55,12 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	}
 	r.Lead = lead
 	r.State = StateFollower
+
+	r.logger.stateToFollower(oldTerm)
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
-	if r.State != StateFollower && r.State != StateCandidate {
-		panic("invalid state transition")
-	}
 	// increment term.
 	r.Term++
 
@@ -71,36 +74,53 @@ func (r *Raft) becomeCandidate() {
 
 	// now it's safe to become a candidate.
 	r.State = StateCandidate
+
+	r.logger.stateToCandidate()
 }
 
 // upon becoming a new candidate, broadcast RequestVote RPCs to start a new round of election.
 func (r *Raft) bcastRequestVote() {
-	for _, to := range r.peers {
+	r.logger.bcastRVOT()
+
+	for to := range r.Prs {
 		// skip myself.
 		if to != r.id {
-			r.sendRequestVote(to)
+			r.forwardMsgUp(pb.Message{
+				MsgType: pb.MessageType_MsgRequestVote,
+				From:    r.id,
+				To:      to,
+				Term:    r.Term,
+			})
 		}
 	}
 }
 
 // handle RequestVote RPC request.
-func (r *Raft) handleRequestVote(req pb.Message) {
+func (r *Raft) handleRequestVote(m pb.Message) {
+	r.logger.recvRVOT(m)
+
 	// if I'm stale, keep pace with the candidate.
-	if req.Term > r.Term {
+	if m.Term > r.Term {
 		// update my term, since
-		r.becomeFollower(req.Term, req.From)
+		r.becomeFollower(m.Term, m.From)
 	}
 
 	reject := true // reject granting the vote?
 	// grant vote only if he is not stale.
 	// FIXME: Shall check state? For e.g. only candidate or follower can grant vote?
-	if req.Term >= r.Term {
+	if m.Term >= r.Term {
 		// r.Vote == req.From says: since the network may duplicate the RPC request,
 		// I have to vote for the same candidate once again if necessary.
-		if r.Vote == None || r.Vote == req.From {
-			r.Vote = req.From
+		if r.Vote == None || r.Vote == m.From {
+			r.Vote = m.From
 			reject = false
 		}
+	}
+
+	if !reject {
+		r.logger.voteTo(m.From)
+	} else {
+		r.logger.rejectVoteTo(m.From)
 	}
 
 	// reset election timer since I've granted the vote and this may result in spawning a new leader.
@@ -109,22 +129,22 @@ func (r *Raft) handleRequestVote(req pb.Message) {
 		r.resetElectionTimer()
 	}
 
-	// construct RequestVote response.
-	res := pb.Message{
+	// send the response.
+	r.forwardMsgUp(pb.Message{
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
-		To:      req.From,
+		To:      m.From,
 		From:    r.id,
 		Term:    r.Term,
 		Reject:  reject,
-	}
-	// send the response.
-	r.msgs = append(r.msgs, res)
+	})
 }
 
 // handle RequestVote RPC response.
-func (r *Raft) handleRequestVoteResponse(res pb.Message) {
-	if res.Term > r.Term {
-		r.becomeFollower(res.Term, res.From)
+func (r *Raft) handleRequestVoteResponse(m pb.Message) {
+	r.logger.recvRVOTRes(m)
+
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, m.From)
 		// stop voting if I step down.
 		return
 	}
@@ -135,7 +155,7 @@ func (r *Raft) handleRequestVoteResponse(res pb.Message) {
 	}
 
 	// whatever the from node voted for or against, record it.
-	r.votes[res.From] = !res.Reject
+	r.votes[m.From] = !m.Reject
 
 	// FIXME: Shall I differentiate between supports and denials?
 	num_supports := 0 // number of nodes supporting me to become the leader.
@@ -149,40 +169,34 @@ func (r *Raft) handleRequestVoteResponse(res pb.Message) {
 	}
 
 	// a majority of nodes in the cluster support me, I become the new leader.
-	if 2*num_supports > len(r.peers) {
+	if 2*num_supports > len(r.Prs) {
 		r.becomeLeader()
-		// immediately broadcast a no-op entry to advocate my leadership and
-		// make followers catch up quickly.
-		r.bcastAppendEntriesNoop()
+		r.bcastAppendEntries(true)
 		return
 	}
 
 	// a majority of nodes in the cluster reject me, I step down.
-	if 2*num_denials > len(r.peers) {
-		r.becomeFollower(r.Term, res.From)
+	if 2*num_denials > len(r.Prs) {
+		r.becomeFollower(r.Term, m.From)
 	}
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
+	r.logger.stateToLeader()
+
 	r.resetVoteRecord()
 	r.resetPeerProgress()
 	r.State = StateLeader
+
 	// upon becoming a new leader, broadcast a no-op entry to claim the leadership
 	// and keep other nodes' log in sync.
-	r.appendEntries(r.makeNoopEntry())
-}
-
-// upon becoming a new leader, broadcast a no-op entry to claim the leadership
-// and keep other servers' log in sync.
-// FIXME: Shall I wrap sending no-op entry into sending normal entires?
-func (r *Raft) bcastAppendEntriesNoop() {
-	for _, to := range r.peers {
-		// skip myself.
-		if to != r.id {
-			r.sendAppendEntriesNoop(to)
-		}
-	}
+	// upon becoming a new leader, immediately append a no-op entry and then broadcast it out
+	// to claim the leadership and keep other peers' log in sync quickly.
+	// when this no-op entry is committed, all entries including entries of previous terms
+	// are also committed.
+	noop_ent := r.makeNoopEntry()
+	r.appendEntries([]*pb.Entry{&noop_ent})
 }
 
 //
@@ -200,75 +214,23 @@ func (r *Raft) resetElectionTimer() {
 	r.electionTimeout = r.electionTimeoutBase + (rand.Int() % r.electionTimeoutBase)
 }
 
-func (r *Raft) makeRequestVote(to uint64) pb.Message {
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgRequestVote,
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-	}
-	return msg
-}
-
-func (r *Raft) sendRequestVote(to uint64) {
-	msg := r.makeRequestVote(to)
-	r.forwardMsgUp(msg)
-}
-
 // reset progress of each peer except this node itself.
 // called when the node boots up or wins an election.
 func (r *Raft) resetPeerProgress() {
-	for _, id := range r.peers {
-		r.Prs[id] = &Progress{
-			Next:  r.RaftLog.LastIndex() + 1,
-			Match: 0,
-		}
+	l := r.RaftLog
+	for _, pr := range r.Prs {
+		pr.Next = l.LastIndex() + 1
+		pr.Match = 0
 	}
 }
 
 // the tests assume a no-op entry is an entry with nil Data.
-func (r *Raft) makeNoopEntry() []*pb.Entry {
-	noop_entry := make([]*pb.Entry, 0)
-	noop_entry = append(noop_entry, &pb.Entry{
+func (r *Raft) makeNoopEntry() pb.Entry {
+	ent := pb.Entry{
 		EntryType: pb.EntryType_EntryNormal,
 		Term:      r.Term,
 		Index:     r.RaftLog.LastIndex() + 1,
 		Data:      nil,
-	})
-	return noop_entry
-}
-
-// FIXME: wrap sendAppendEntriesNoop and sendAppendEntries into one method.
-func (r *Raft) makeAppendEntriesNoop(to uint64) pb.Message {
-	var prevLogIndex, prevLogTerm uint64 = 0, 0
-	prs := r.Prs[to]
-	l := r.RaftLog
-
-	prevLogIndex = min(prs.Next-1, l.LastIndex())
-	prevEntry, err := l.Entry(prevLogIndex)
-	if err != nil {
-		prevLogTerm = prevEntry.Term
 	}
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgAppend,
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-		Index:   prevLogIndex,
-		LogTerm: prevLogTerm,
-		Commit:  l.committed,
-	}
-
-	ents := l.sliceEntsStartAt(prs.Next)
-	msg.Entries = make([]*pb.Entry, 0)
-	for _, ent := range ents {
-		msg.Entries = append(msg.Entries, &ent)
-	}
-
-	return msg
-}
-
-func (r *Raft) sendAppendEntriesNoop(to uint64) {
-	msg := r.makeAppendEntriesNoop(to)
-	r.forwardMsgUp(msg)
+	return ent
 }

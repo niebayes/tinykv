@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -32,9 +33,9 @@ const (
 )
 
 var stmap = [...]string{
-	"StateFollower",
-	"StateCandidate",
-	"StateLeader",
+	"F", // follower
+	"C", // candidate
+	"L", // leader
 }
 
 func (st StateType) String() string {
@@ -117,6 +118,8 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	logger *Logger
 }
 
 // newRaft return a raft peer with the given config
@@ -142,7 +145,12 @@ func newRaft(c *Config) *Raft {
 		electionTimeoutBase: c.ElectionTick,
 		heartbeatElapsed:    0,
 		electionElapsed:     0,
+		// logger:              &DefaulLogger{},
 	}
+
+	// init logger.
+	r.logger = makeLogger(false, "raft.log")
+	r.RaftLog.r = r
 
 	// init progress.
 	r.resetPeerProgress()
@@ -186,10 +194,12 @@ func (r *Raft) tick() {
 func (r *Raft) tickElection() {
 	r.electionElapsed++
 	if r.electionElapsed >= r.electionTimeout {
-		msg := pb.Message{
+		r.logger.elecTimeout()
+		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgHup,
-		}
-		r.Step(msg)
+			From: r.id, 
+			To: r.id,
+		})
 	}
 }
 
@@ -198,10 +208,12 @@ func (r *Raft) tickElection() {
 func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
-		msg := pb.Message{
+		r.logger.beatTimeout()
+		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgBeat,
-		}
-		r.Step(msg)
+			From: r.id, 
+			To: r.id,
+		})
 	}
 }
 
@@ -227,7 +239,7 @@ func (r *Raft) Step(msg pb.Message) error {
 func (r *Raft) stepFollower(msg pb.Message) {
 	switch msg.MsgType {
 	case pb.MessageType_MsgHup:
-		r.handleMsgHup(msg)
+		r.handleMsgHup()
 	case pb.MessageType_MsgBeat:
 		// dropped.
 	case pb.MessageType_MsgPropose:
@@ -253,7 +265,7 @@ func (r *Raft) stepFollower(msg pb.Message) {
 func (r *Raft) stepCandidate(msg pb.Message) {
 	switch msg.MsgType {
 	case pb.MessageType_MsgHup:
-		r.handleMsgHup(msg)
+		r.handleMsgHup()
 	case pb.MessageType_MsgBeat:
 		// dropped.
 	case pb.MessageType_MsgPropose:
@@ -281,7 +293,7 @@ func (r *Raft) stepLeader(msg pb.Message) {
 	case pb.MessageType_MsgHup:
 		// dropped.
 	case pb.MessageType_MsgBeat:
-		r.handleBeat(msg)
+		r.handleBeat()
 	case pb.MessageType_MsgPropose:
 		r.handlePropose(msg)
 	case pb.MessageType_MsgRequestVote:

@@ -18,38 +18,51 @@
 package raft
 
 import (
-	"math"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
-// if log consistency says that it's term conflicts, set LogTerm = TermConflict in the response msg.
-var TermConflict uint64 = math.MaxUint64
-
 // handle MsgPropose message.
-func (r *Raft) handlePropose(msg pb.Message) {
-	r.mustAppendEntries(msg.Entries)
-	// followers will drop this msg. (Possibly they will redirect it to the leader)
+func (r *Raft) handlePropose(m pb.Message) {
+	r.logger.recvPROP(m)
+
+	// annotate entries with the current term and the corresponding index.
+	li := r.RaftLog.LastIndex()
+	for i := 0; i < len(m.Entries); i++ {
+		entry := *m.Entries[i]
+		entry.Index = li + uint64(i) + 1
+		entry.Term = r.Term
+	}
+	r.appendEntries(m.Entries)
+
+	// followers will drop MsgProp. (Possibly they will redirect it to the leader)
 	// candidates only append entries.
 	// leader append entries and broadcast them out.
 	if r.State == StateLeader {
 		// if there's only one node in the cluster, each MsgPropose would drive the update of the commit index.
-		r.maybeUpdateCommitIndex()
-		r.bcastAppendEntries()
+		if updated := r.maybeUpdateCommitIndex(); updated || len(m.Entries) > 0 {
+			r.bcastAppendEntries(true)
+		}
 	}
 }
 
-// broadcast AppendEntries RPCs to all peers (except me) the leader thinks it's alive
-func (r *Raft) bcastAppendEntries() {
-	for _, to := range r.peers {
+// broadcast AppendEntries RPC to all other peers in the cluster.
+// if must is false and there's no new entries to send to a peer, don't send RPC to the peer.
+// if must is true, the RPC is always sent and if there's no new entries, the latest snapshot is sent.
+// if there's no available snapshot right, panic.
+func (r *Raft) bcastAppendEntries(must bool) {
+	r.logger.bcastAENT()
+
+	for to := range r.Prs {
 		if to != r.id {
-			r.sendAppendEntries(to)
+			r.sendAppendEntries(to, true)
 		}
 	}
 }
 
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
+	r.logger.recvAENT(m)
+
 	// drop stale msgs.
 	if m.Term < r.Term {
 		return
@@ -85,6 +98,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 				Reason:    pb.RejectReason_IndexConflict,
 				NextIndex: l.LastIndex() + 1,
 			})
+
+			r.logger.rejectEnts(pb.RejectReason_IndexConflict, m.From)
 			return
 
 		} else if ent.Term != prevLogTerm {
@@ -115,6 +130,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 				NextIndex:    nextIndex,
 				ConflictTerm: conflictTerm,
 			})
+
+			r.logger.rejectEnts(pb.RejectReason_TermConflict, m.From)
 			return
 		}
 	}
@@ -126,12 +143,15 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 	// update commit index.
 	if m.Commit > l.committed {
+		oldCommitted := l.committed
+
 		// committed entries must be those entries that I have
 		l.committed = min(m.Commit, lastNewEntryIndex)
-	}
 
-	// update stable index.
-	// l.stabled = max(l.stabled, lastNewEntryIndex)
+		if l.committed != oldCommitted {
+			r.logger.updateCommitted(oldCommitted)
+		}
+	}
 
 	r.forwardMsgUp(pb.Message{
 		MsgType:   pb.MessageType_MsgAppendResponse,
@@ -150,6 +170,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 // handle AppendEntries RPC response.
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
+	r.logger.recvAENTRes(m)
+
 	// drop stale msgs.
 	if m.Term < r.Term {
 		return
@@ -161,15 +183,18 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		return
 	}
 
-	prs, ok := r.Prs[m.From]
+	pr, ok := r.Prs[m.From]
 	if !ok {
 		return
 	}
 
+	oldNext := pr.Next
+	oldMatch := pr.Match
+
 	if m.Reject {
 		switch m.Reason {
 		case pb.RejectReason_IndexConflict:
-			prs.Next = m.NextIndex
+			pr.Next = m.NextIndex
 		case pb.RejectReason_TermConflict:
 			// first search the log with the conflict term.
 			l := r.RaftLog
@@ -180,10 +205,10 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 				if ent.Term == m.ConflictTerm {
 					found = true
 					// the next set of entries sent to the follower will skip all logs with the conflict term.
-					prs.Next = ent.Index + 1
+					pr.Next = ent.Index + 1
 					for _, ent = range l.entries[i+1:] {
 						if ent.Index != m.ConflictTerm {
-							prs.Next = ent.Index
+							pr.Next = ent.Index
 							break
 						}
 					}
@@ -193,30 +218,34 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 			if !found {
 				// if not found, nothing to skip.
 				// the only thing leader can do is to accept the suggestion from the server and try again.
-				prs.Next = m.NextIndex
+				pr.Next = m.NextIndex
 			}
 		default:
 			panic("unknown reject reason")
 		}
 		// to ensure the next index does not go below 1.
-		prs.Next = max(prs.Next, 1)
+		pr.Next = max(pr.Next, 1)
 
 		// TODO: immediately send AppendEntries RPC to the peer.
 
 	} else {
-		prs.Next = max(prs.Next, m.Index+1) // the test suites are creepy.
-		prs.Next = max(prs.Next, m.NextIndex)
-		prs.Match = prs.Next - 1
+		pr.Next = max(pr.Next, m.Index+1) // the test suites are creepy.
+		pr.Next = max(pr.Next, m.NextIndex)
+		pr.Match = pr.Next - 1
 	}
+
+	r.logger.updateProgOf(m.From, oldNext, oldMatch, pr.Next, pr.Match)
 
 	// if a majority of followers has not rejected the entries, the entries are committed in the leader.
 	if r.maybeUpdateCommitIndex() {
 		// if the commit index is updated, immediately broadcast AppendEntries RPC to notify the followers ASAP.
-		r.bcastAppendEntries()
+		r.bcastAppendEntries(true)
 	}
 }
 
 func (r *Raft) bcastHeartbeat() {
+	r.logger.bcastHBET()
+
 	for _, to := range r.peers {
 		if to != r.id {
 			r.sendHeartbeat(to)
@@ -225,59 +254,69 @@ func (r *Raft) bcastHeartbeat() {
 }
 
 // handleHeartbeat handle Heartbeat RPC request
-func (r *Raft) handleHeartbeat(req pb.Message) {
+func (r *Raft) handleHeartbeat(m pb.Message) {
 	// step down if I'm stale.
-	if req.Term > r.Term {
-		r.becomeFollower(req.Term, req.From)
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, m.From)
 	}
 
 	// reject if the from node is stale.
 	reject := false
-	if req.Term < r.Term {
+	if m.Term < r.Term {
 		reject = true
 	}
 
 	if !reject {
 		// I admit the from node is the current leader, so I step down and reset election timer
 		// to not compete with him.
-		r.becomeFollower(req.Term, req.From)
+		r.becomeFollower(m.Term, m.From)
 		r.resetElectionTimer()
 	}
 
-	// construct the response.
-	res := pb.Message{
+	// send the response.
+	r.forwardMsgUp(pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
-		To:      req.From,
+		To:      m.From,
 		From:    r.id,
 		Reject:  reject,
-	}
-
-	// send the response.
-	r.msgs = append(r.msgs, res)
+	})
 }
 
 // handle Heartbeat RPC response.
-func (r *Raft) handleHeartbeatResponse(res pb.Message) {
-
+func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 }
 
 //
 // utilities.
 //
 
+// transform []*pb.Entry to []pb.Entry since the appended log entries must be []pb.Entry.
+func entsClone(ents []*pb.Entry) []pb.Entry {
+	ents_clone := make([]pb.Entry, 0)
+	for _, ent := range ents {
+		ents_clone = append(ents_clone, *ent)
+	}
+	return ents_clone
+}
+
+// transform []pb.Entry to []*pb.Entry.
+func entsRef(ents []pb.Entry) []*pb.Entry {
+	ents_ref := make([]*pb.Entry, 0)
+	for _, ent := range ents {
+		ents_ref = append(ents_ref, &ent)
+	}
+	return ents_ref
+}
+
 // the entries ents are appended whatsoever.
-// generally called when raft module receives new log entries from the upper application.
-func (r *Raft) mustAppendEntries(ents []*pb.Entry) {
-	li := r.RaftLog.LastIndex()
-	for i := 0; i < len(ents); i++ {
-		entry := *ents[i]
-		entry.Index = li + uint64(i) + 1
-		entry.Term = r.Term
-		r.RaftLog.entries = append(r.RaftLog.entries, entry)
+func (r *Raft) appendEntries(ents []*pb.Entry) {
+	l := r.RaftLog
+	for _, ent := range ents {
+		l.entries = append(l.entries, *ent)
 	}
 }
 
-func (r *Raft) agreedWithMajority(index uint64) bool {
+func (r *Raft) checkQuorumAppend(index uint64) bool {
 	cnt := 1 // the leader has already replicated the log entry.
 	for id, prs := range r.Prs {
 		if id != r.id {
@@ -296,68 +335,52 @@ func (r *Raft) maybeUpdateCommitIndex() bool {
 		if l.entries[index].Term != r.Term {
 			continue
 		}
-		if r.agreedWithMajority(index) {
+		if r.checkQuorumAppend(index) {
+			oldCommitted := l.committed
 			l.committed = index
+			r.logger.updateCommitted(oldCommitted)
 			return true
 		}
 	}
 	return false
 }
 
-func (r *Raft) appendEntries(entries []*pb.Entry) {
-	for _, entry := range entries {
-		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
-	}
-}
-
-func (r *Raft) makeEntries(to uint64) []*pb.Entry {
-	prs, ok := r.Prs[to]
-	if !ok {
-		return nil
-	}
-
-	ents0 := r.RaftLog.sliceEntsStartAt(prs.Next)
-	ents := make([]*pb.Entry, 0)
-	for _, entry := range ents0 {
-		ents = append(ents, &entry)
-	}
-	return ents
-}
-
-// the leader sends each peer in the cluster except itself the log entries it thinks they need
-// according to each peer's progress.
-func (r *Raft) makeAppendEntries(to uint64) pb.Message {
+func (r *Raft) sendAppendEntries(to uint64, must bool) {
 	l := r.RaftLog
-	// FIXME: rewrite the logic of making entries: use Prs.Next instead.
-	ents := r.makeEntries(to)
-	msg := pb.Message{
+	pr := r.Prs[to]
+
+	prevLogIndex := uint64(0)
+	prevLogTerm := uint64(0)
+	prevLog, err := l.Entry(pr.Next - 1)
+	if err == nil {
+		prevLogIndex = prevLog.Index
+		prevLogTerm = prevLog.Term
+	}
+
+	// entries to be sent.
+	ents := l.sliceStartAt(pr.Next)
+	ents_ref := entsRef(ents)
+
+	m := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
 		Commit:  l.committed,
-		Entries: ents,
+		Index:   prevLogIndex,
+		LogTerm: prevLogTerm,
+		Entries: ents_ref,
 	}
-	if len(ents) > 0 {
-		prevLog, err := l.Entry(ents[0].Index - 1)
-		if err == nil {
-			msg.Index = prevLog.Index
-			msg.LogTerm = prevLog.Term
-		}
-	}
-	return msg
+	r.forwardMsgUp(m)
+
+	r.logger.sendEnts(ents, to)
 }
 
+// only used in test cases.
+// I want a consistent naming convention in my implementation, so this method is only a wrapper
+// of my implementation.
 func (r *Raft) sendAppend(to uint64) bool {
-	r.sendAppendEntries(to)
-	return true
-}
-
-// sendAppend sends an append RPC with new entries (if any) and the
-// current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppendEntries(to uint64) bool {
-	msg := r.makeAppendEntries(to)
-	r.forwardMsgUp(msg)
+	r.sendAppendEntries(to, true)
 	return true
 }
 
@@ -378,6 +401,6 @@ func (r *Raft) makeHeartbeat(to uint64) pb.Message {
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
-	msg := r.makeHeartbeat(to)
-	r.msgs = append(r.msgs, msg)
+	m := r.makeHeartbeat(to)
+	r.forwardMsgUp(m)
 }
