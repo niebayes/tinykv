@@ -38,6 +38,9 @@ func (r *Raft) handlePropose(m pb.Message) {
 	// candidates only append entries.
 	// leader append entries and broadcast them out.
 	if r.State == StateLeader {
+		// update the leader's own progress as the test requires.
+		r.updateLeaderProg()
+
 		// if there's only one node in the cluster, each MsgPropose would drive the update of the commit index.
 		if updated := r.maybeUpdateCommitIndex(); updated || len(m.Entries) > 0 {
 			r.bcastAppendEntries(true)
@@ -471,4 +474,18 @@ func (r *Raft) makeHeartbeat(to uint64) pb.Message {
 func (r *Raft) sendHeartbeat(to uint64) {
 	m := r.makeHeartbeat(to)
 	r.forwardMsgUp(m)
+}
+
+func (r *Raft) updateLeaderProg() {
+	l := r.RaftLog
+	pr := r.Prs[r.id]
+
+	oldNext := pr.Next
+	oldMatch := pr.Match
+
+	pr.Next = l.LastIndex() + 1
+	// max is applied to follow the convention that match index never reduces.
+	pr.Match = max(pr.Match, pr.Next-1)
+
+	r.logger.updateProgOf(r.id, oldNext, oldMatch, pr.Next, pr.Match)
 }

@@ -193,6 +193,8 @@ func (r *Raft) becomeLeader() {
 	noop_ent := r.makeNoopEntry()
 	r.appendEntries([]*pb.Entry{&noop_ent})
 	r.logger.appendEnts([]pb.Entry{noop_ent})
+	
+	r.updateLeaderProg()
 }
 
 //

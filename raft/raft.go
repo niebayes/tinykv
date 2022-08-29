@@ -251,7 +251,7 @@ func (r *Raft) stepFollower(msg pb.Message) {
 	case pb.MessageType_MsgBeat:
 		// dropped.
 	case pb.MessageType_MsgPropose:
-		r.appendEntries(msg.Entries)
+		r.handlePropose(msg)
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(msg)
 	case pb.MessageType_MsgRequestVoteResponse:
