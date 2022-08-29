@@ -28,11 +28,11 @@ func (r *Raft) handlePropose(m pb.Message) {
 	// annotate entries with the current term and the corresponding index.
 	li := r.RaftLog.LastIndex()
 	for i := 0; i < len(m.Entries); i++ {
-		entry := *m.Entries[i]
-		entry.Index = li + uint64(i) + 1
-		entry.Term = r.Term
+		m.Entries[i].Index = li + uint64(i) + 1
+		m.Entries[i].Term = r.Term
 	}
 	r.appendEntries(m.Entries)
+	r.logger.appendEnts(entsClone(m.Entries))
 
 	// followers will drop MsgProp. (Possibly they will redirect it to the leader)
 	// candidates only append entries.
@@ -136,6 +136,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		}
 	}
 
+	r.logger.acceptEnts(m.From)
+
 	// the new entries are not rejected if passed the log consistency check.
 	// but some of them may be stale, some of them may have conflict,
 	// so I have to skip conflicts and append the actually new entries which I don't have.
@@ -233,6 +235,9 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		pr.Next = max(pr.Next, m.NextIndex)
 		pr.Match = pr.Next - 1
 	}
+	// next index cannot go beyond last index + 1.
+	l := r.RaftLog
+	pr.Next = max(pr.Next, l.LastIndex() + 1)
 
 	r.logger.updateProgOf(m.From, oldNext, oldMatch, pr.Next, pr.Match)
 
@@ -398,6 +403,9 @@ func (r *Raft) sendAppendEntries(to uint64, must bool) {
 
 	// entries to be sent.
 	ents := l.sliceStartAt(pr.Next)
+	if len(ents) == 0 && !must {
+		return
+	}
 	ents_ref := entsRef(ents)
 
 	m := pb.Message{
@@ -412,7 +420,7 @@ func (r *Raft) sendAppendEntries(to uint64, must bool) {
 	}
 	r.forwardMsgUp(m)
 
-	r.logger.sendEnts(ents, to)
+	r.logger.sendEnts(prevLogIndex, prevLogTerm, ents, to)
 }
 
 // only used in test cases.

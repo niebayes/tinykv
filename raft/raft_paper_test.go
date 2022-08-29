@@ -899,14 +899,14 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	if r.State != StateLeader {
 		panic("it should only be used when it is the leader")
 	}
-	for id := range r.Prs {
-		if id == r.id {
-			continue
-		}
-
-		// sendAppend will send a no-op entry if there're no new entries.
-		r.sendAppend(id)
-	}
+	// for id := range r.Prs {
+	// 	if id == r.id {
+	// 		continue
+	// 	}
+	// 	// sendAppend will send a no-op entry if there're no new entries.
+	// 	r.sendAppend(id)
+	// }
+	r.bcastAppendEntries(true)
 	// simulate the response of MessageType_MsgAppend
 	msgs := r.readMessages()
 	for _, m := range msgs {
@@ -925,6 +925,9 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	// since it's no-op, the upper application does not need to execute it, so applied = committed.
 	r.RaftLog.applied = r.RaftLog.committed
 	r.RaftLog.stabled = r.RaftLog.LastIndex()
+
+	r.logger.updateApplied(0)
+	r.logger.updateStabled(0)
 }
 
 // accept and append all entries conveyed in the message.
@@ -939,6 +942,7 @@ func acceptAndReply(m pb.Message) pb.Message {
 		Term:    m.Term,
 		MsgType: pb.MessageType_MsgAppendResponse,
 		Index:   m.Index + uint64(len(m.Entries)),
+		NextIndex: m.Index + uint64(len(m.Entries)) + 1,
 		// FIXME: This is my modification.
 		// Entries: m.Entries,
 	}

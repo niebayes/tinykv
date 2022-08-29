@@ -6,3 +6,4 @@ bin/*
 _tools
 /vendor
 .DS_Store
+*.log

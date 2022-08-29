@@ -145,7 +145,7 @@ func newRaft(c *Config) *Raft {
 	}
 
 	// init logger.
-	r.logger = makeLogger(true, "raft.log")
+	r.logger = makeLogger(false, "raft.log")
 	r.logger.r = r
 
 	// init peer progress.
@@ -167,6 +167,8 @@ func newRaft(c *Config) *Raft {
 	r.Term = hardstate.Term
 	r.RaftLog.committed = hardstate.Commit
 	// TODO: restore persisted log from snapshot.
+
+	r.logger.startRaft()
 
 	return r
 }

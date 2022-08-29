@@ -71,8 +71,9 @@ enum MessageType {
 }
 
 enum RejectReason {
-    TermConflict = 0;
+    None = 0; // not rejected.
     IndexConflict = 1;
+    TermConflict = 2;
 }
 
 message Message {

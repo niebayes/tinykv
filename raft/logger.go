@@ -10,7 +10,7 @@ import (
 )
 
 // true to turn on debugging/logging.
-const debug = true
+const debug = false
 
 // what topic the log message is related to.
 // logs are organized by topics which further consists of events.
@@ -68,9 +68,10 @@ func (logger *Logger) setLogFile(filename string) {
 func (logger *Logger) printf(topic logTopic, format string, a ...interface{}) {
 	// print iff debug is set.
 	if debug {
-		time := time.Since(logger.startTime).Milliseconds()
+		// time := time.Since(logger.startTime).Milliseconds()
+		time := time.Since(logger.startTime).Microseconds()
 		// e.g. 008256 VOTE ...
-		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
+		prefix := fmt.Sprintf("%09d %v ", time, string(topic))
 		format = prefix + format
 		log.Printf(format, a...)
 	}
@@ -109,6 +110,16 @@ func getVerbosityLevel() int {
 }
 
 //
+// persistence events.
+//
+
+func (l *Logger) startRaft() {
+	r := l.r
+	l.printf(dPersist, "N%v START (T:%v V:%v CI:%v AI:%v SI:%v)", r.id, r.Term, r.Vote, r.RaftLog.committed,
+		r.RaftLog.applied, r.RaftLog.stabled)
+}
+
+//
 // leader election events.
 //
 
@@ -129,7 +140,7 @@ func (l *Logger) stateToCandidate() {
 
 func (l *Logger) bcastRVOT() {
 	r := l.r
-	l.printf(dElect, "N%v BCAST RVOT (T:%v)", r.id, r.Term)
+	l.printf(dElect, "N%v @ RVOT (T:%v)", r.id, r.Term)
 }
 
 func (l *Logger) recvRVOT(m pb.Message) {
@@ -169,6 +180,7 @@ func (l *Logger) stateToFollower(oldTerm uint64) {
 func (l *Logger) recvPROP(m pb.Message) {
 	r := l.r
 	l.printf(dReplicate, "N%v <- PROP (LN:%v)", r.id, len(m.Entries))
+	l.printEnts(dReplicate, r.id, entsClone(m.Entries))
 }
 
 func (l *Logger) appendEnts(ents []pb.Entry) {
@@ -179,16 +191,22 @@ func (l *Logger) appendEnts(ents []pb.Entry) {
 
 func (l *Logger) bcastAENT() {
 	r := l.r
-	l.printf(dReplicate, "N%v BCAST AENT", r.id)
+	l.printf(dReplicate, "N%v @ AENT", r.id)
 }
 
-func (l *Logger) sendEnts(ents []pb.Entry, to uint64) {
+func (l *Logger) sendEnts(prevLogIndex, prevLogTerm uint64, ents []pb.Entry, to uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v e-> N%v (LN:%v)", r.id, to, len(ents))
+	l.printf(dReplicate, "N%v e-> N%v (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, to, r.Term, r.RaftLog.committed, prevLogIndex, prevLogTerm, len(ents))
 	l.printEnts(dReplicate, r.id, ents)
 }
 
+func (l *Logger) acceptEnts(from uint64) {
+	r := l.r
+	l.printf(dReplicate, "N%v &e<- N%v", r.id, from)
+}
+
 var reasonMap = [...]string{
+	"NO", // not reject
 	"IC", // index conflict.
 	"TC", // term conflict.
 }
@@ -206,22 +224,22 @@ func (l *Logger) discardEnts(ents []pb.Entry) {
 
 func (l *Logger) updateProgOf(id, oldNext, oldMatch, newNext, newMatch uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v PROG OF N%v (NI:%v MI:%v) -> (NI:%v MI:%v)", r.id, id, oldNext, oldMatch, newNext, newMatch)
+	l.printf(dReplicate, "N%v ^pr N%v (NI:%v MI:%v) -> (NI:%v MI:%v)", r.id, id, oldNext, oldMatch, newNext, newMatch)
 }
 
 func (l *Logger) updateCommitted(oldCommitted uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v (CI:%v) -> (CI:%v)", r.id, r.RaftLog.committed, oldCommitted)
+	l.printf(dReplicate, "N%v ^ci (CI:%v) -> (CI:%v)", r.id, oldCommitted, r.RaftLog.committed)
 }
 
 func (l *Logger) updateStabled(oldStabled uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v (SI:%v) -> (SI:%v)", r.id, r.RaftLog.stabled, oldStabled)
+	l.printf(dReplicate, "N%v ^si (SI:%v) -> (SI:%v)", r.id, oldStabled, r.RaftLog.stabled)
 }
 
 func (l *Logger) updateApplied(oldApplied uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v (AI:%v) -> (AI:%v)", r.id, r.RaftLog.applied, oldApplied)
+	l.printf(dReplicate, "N%v ^ai (AI:%v) -> (AI:%v)", r.id, oldApplied, r.RaftLog.applied)
 }
 
 func (l *Logger) recvAENT(m pb.Message) {
@@ -241,7 +259,7 @@ func (l *Logger) recvBEAT() {
 
 func (l *Logger) bcastHBET() {
 	r := l.r
-	l.printf(dReplicate, "N%v BCAST HBET", r.id)
+	l.printf(dReplicate, "N%v @ HBET", r.id)
 }
 
 func (l *Logger) beatTimeout() {
@@ -261,6 +279,6 @@ func (l *Logger) restoreEnts(ents []pb.Entry) {
 
 func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 	for _, ent := range ents {
-		l.printf(topic, "N%v \t(I:%v T:%v D:%v)", id, ent.Index, ent.Term, ent.Data)
+		l.printf(topic, "N%v \t(I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
 	}
 }

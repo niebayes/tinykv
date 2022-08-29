@@ -73,9 +73,8 @@ func (r *Raft) becomeCandidate() {
 	r.resetElectionTimer()
 
 	// now it's safe to become a candidate.
-	r.State = StateCandidate
-
 	r.logger.stateToCandidate()
+	r.State = StateCandidate
 }
 
 // upon becoming a new candidate, broadcast RequestVote RPCs to start a new round of election.
@@ -197,6 +196,7 @@ func (r *Raft) becomeLeader() {
 	// are also committed.
 	noop_ent := r.makeNoopEntry()
 	r.appendEntries([]*pb.Entry{&noop_ent})
+	r.logger.appendEnts([]pb.Entry{noop_ent})
 }
 
 //
