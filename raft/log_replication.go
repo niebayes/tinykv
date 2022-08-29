@@ -139,7 +139,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	// the new entries are not rejected if passed the log consistency check.
 	// but some of them may be stale, some of them may have conflict,
 	// so I have to skip conflicts and append the actually new entries which I don't have.
-	lastNewEntryIndex := l.appendNewEntries(m.Entries)
+	lastNewEntryIndex := r.appendNewEntries(m.Entries)
 
 	// update commit index.
 	if m.Commit > l.committed {
@@ -246,7 +246,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 func (r *Raft) bcastHeartbeat() {
 	r.logger.bcastHBET()
 
-	for _, to := range r.peers {
+	for to := range r.Prs {
 		if to != r.id {
 			r.sendHeartbeat(to)
 		}
@@ -316,6 +316,45 @@ func (r *Raft) appendEntries(ents []*pb.Entry) {
 	}
 }
 
+// append the actually new entries that I don't have.
+// if all entries are stale or conflicting, return 0.
+// otherwise, return the index of last new entry.
+func (r *Raft) appendNewEntries(nents []*pb.Entry) uint64 {
+	l := r.RaftLog
+
+	// since followers simply duplicate the leader's log,
+	// and hence if an existing entry conflicts with the entries received from the leader,
+	// delete the conflicting entry and all entries follow it in followers.
+	for i := 0; i < len(nents); i++ {
+		nent := nents[i]                // leader's entry.
+		ent, err := l.Entry(nent.Index) // my entry.
+		// all entris before the conflict entry were appended to my log.
+		// all entries after and including the conflict entry needs to be appended to my log;
+		if err != nil || ent.Term != nent.Term {
+			if ent != nil && ent.Index <= l.committed {
+				panic(ErrDiscardCommitted)
+			}
+			if ent != nil {
+				// discard conflict entry and all follow it.
+				offset := l.idx2off(ent.Index)
+				r.logger.discardEnts(l.entries[offset:])
+				l.entries = l.entries[:offset]
+				// some stable entries may be discarded, so update stable index.
+				l.stabled = min(l.stabled, l.LastIndex())
+			}
+
+			// append new entries.
+			nents_clone := entsClone(nents[i:])
+			l.entries = append(l.entries, nents_clone...)
+
+			r.logger.appendEnts(nents_clone)
+
+			return l.LastIndex()
+		}
+	}
+	return 0
+}
+
 func (r *Raft) checkQuorumAppend(index uint64) bool {
 	cnt := 1 // the leader has already replicated the log entry.
 	for id, prs := range r.Prs {
@@ -325,7 +364,7 @@ func (r *Raft) checkQuorumAppend(index uint64) bool {
 			}
 		}
 	}
-	return 2*cnt > len(r.peers)
+	return 2*cnt > len(r.Prs)
 }
 
 func (r *Raft) maybeUpdateCommitIndex() bool {

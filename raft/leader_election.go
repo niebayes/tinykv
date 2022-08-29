@@ -29,7 +29,7 @@ func (r *Raft) handleMsgHup() {
 
 	r.becomeCandidate()
 	// if the cluster only contain one node, this node immediately becomes the leader.
-	if len(r.peers) == 1 {
+	if len(r.Prs) == 1 {
 		r.becomeLeader()
 		return
 	}

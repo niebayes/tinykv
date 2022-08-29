@@ -73,8 +73,10 @@ def main(
             # Debug calls from the test suite aren't associated with
             # any particular peer. Otherwise we can treat second column
             # as peer id
+            # Modify the calculation of i to accomodate the start index of peer id.
+            start_peer_id = 1
             if topic != "TEST":
-                i = int(msg[1])
+                i = int(msg[1]) - start_peer_id
 
             # Colorize output by using rich syntax when needed
             if colorize and topic in TOPICS:

@@ -10,22 +10,7 @@ import (
 )
 
 // true to turn on debugging/logging.
-const debug = false
-
-// true to turn on logging commands.
-const showCommand = false
-
-// true to turn on logging RPC communication events.
-const showRPCCommunication = false
-
-// true to turn on logging reset timer events.
-const showResetTimer = false
-
-// true to only logging FAIL log consistency check among others.
-const showOnlyFailConsistencyCheck = true
-
-// true to turn on logging logs when backup and restore.
-const showLog = false
+const debug = true
 
 // what topic the log message is related to.
 // logs are organized by topics which further consists of events.
@@ -100,6 +85,29 @@ func (logger *Logger) close() {
 	}
 }
 
+// not delete this for backward compatibility.
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if debug {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+// retrieve the verbosity level from an environment variable
+// VERBOSE=0/1/2/3 <=>
+func getVerbosityLevel() int {
+	v := os.Getenv("VERBOSE")
+	level := 0
+	if v != "" {
+		var err error
+		level, err = strconv.Atoi(v)
+		if err != nil {
+			log.Fatalf("Invalid verbosity %v", v)
+		}
+	}
+	return level
+}
+
 //
 // leader election events.
 //
@@ -151,7 +159,7 @@ func (l *Logger) rejectVoteTo(to uint64) {
 
 func (l *Logger) stateToFollower(oldTerm uint64) {
 	r := l.r
-	l.printf(dElect, "N%v %v->%v (LT:%v CT:%v)", r.id, r.State, StateFollower, oldTerm, r.Term)
+	l.printf(dElect, "N%v %v->%v (T:%v) -> (T:%v)", r.id, r.State, StateFollower, oldTerm, r.Term)
 }
 
 //
@@ -166,9 +174,7 @@ func (l *Logger) recvPROP(m pb.Message) {
 func (l *Logger) appendEnts(ents []pb.Entry) {
 	r := l.r
 	l.printf(dReplicate, "N%v +e (LN:%v)", r.id, len(ents))
-	for _, ent := range ents {
-		l.printf(dReplicate, "\t(I:%v T:%v D:%v)", ent.Index, ent.Term, ent.Data)
-	}
+	l.printEnts(dReplicate, r.id, ents)
 }
 
 func (l *Logger) bcastAENT() {
@@ -178,10 +184,8 @@ func (l *Logger) bcastAENT() {
 
 func (l *Logger) sendEnts(ents []pb.Entry, to uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v e-> N%v (LN:%v)", r.id, to)
-	for _, ent := range ents {
-		l.printf(dReplicate, "\t(I:%v T:%v D:%v)", ent.Index, ent.Term, ent.Data)
-	}
+	l.printf(dReplicate, "N%v e-> N%v (LN:%v)", r.id, to, len(ents))
+	l.printEnts(dReplicate, r.id, ents)
 }
 
 var reasonMap = [...]string{
@@ -197,9 +201,7 @@ func (l *Logger) rejectEnts(reason pb.RejectReason, from uint64) {
 func (l *Logger) discardEnts(ents []pb.Entry) {
 	r := l.r
 	l.printf(dReplicate, "N%v -e (LN:%v)", r.id, len(ents))
-	for _, ent := range ents {
-		l.printf(dReplicate, "\t(I:%v T:%v D:%v)", ent.Index, ent.Term, ent.Data)
-	}
+	l.printEnts(dReplicate, r.id, ents)
 }
 
 func (l *Logger) updateProgOf(id, oldNext, oldMatch, newNext, newMatch uint64) {
@@ -247,379 +249,18 @@ func (l *Logger) beatTimeout() {
 	l.printf(dReplicate, "N%v BTO (S:%v T:%v)", r.id, r.State, r.Term)
 }
 
-// 
+//
 // persistence event logging.
 //
 
 func (l *Logger) restoreEnts(ents []pb.Entry) {
-	l.printf(dPersist, "N%v RESTORE ENTS (LN:%v)", len(ents))
+	r := l.r
+	l.printf(dPersist, "N%v RESTORE ENTS (LN:%v)", r.id, len(ents))
+	l.printEnts(dPersist, r.id, ents)
+}
+
+func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 	for _, ent := range ents {
-		l.printf(dPersist, "\t(I:%v T:%v D:%v)", ent.Index, ent.Term, ent.Data)
+		l.printf(topic, "N%v \t(I:%v T:%v D:%v)", id, ent.Index, ent.Term, ent.Data)
 	}
-}
-
-/*************************************
-* leader election events logging.
-**************************************/
-
-func (logger *Logger) logElectionTimeout(serverId, currentTerm int, state StateType) {
-	logger.printf(dElect, "S%v Timeout as %v at T:%v", serverId, state, currentTerm)
-}
-
-func (logger *Logger) logStartNewElection(serverId, currentTerm int, state StateType) {
-	logger.printf(dElect, "S%v Start new election as %v at T:%v", serverId, state, currentTerm)
-}
-
-func (logger *Logger) logStepDown(serverId, oldTerm, newTerm int, stepDown bool) {
-	if stepDown {
-		logger.printf(dElect, "S%v Updated term and stepped down (T:%v -> T:%v)", serverId, oldTerm, newTerm)
-	} else {
-		logger.printf(dElect, "S%v Updated term but not stepped down (T:%v -> T:%v)", serverId, oldTerm, newTerm)
-	}
-}
-
-func (logger *Logger) logBecomeLeader(serverId, currentTerm int) {
-	logger.printf(dElect, "S%v Become leader at T:%v", serverId, currentTerm)
-}
-
-/*************************************
-* voting events logging.
-**************************************/
-
-func (logger *Logger) logRequestVotes(serverId, currentTerm int) {
-	logger.printf(dVote, "S%v Requesting votes at T:%v", serverId, currentTerm)
-}
-
-func (logger *Logger) logGrantVote(voteFromId, voteToId, voteFromTerm, voteToTerm int) {
-	logger.printf(dVote, "S%v Granted vote to S%v (T:%v -> T:%v)", voteFromId, voteToId, voteFromTerm, voteToTerm)
-}
-
-type DenyVoteReason int
-
-const (
-	VOTH DenyVoteReason = iota // already voted to other server in this term.
-	UPTD                       // this server has more up-to-date logs than the requesting server.
-)
-
-func (logger *Logger) logDenyVote(voteFromId, voteToId, voteFromTerm, voteToTerm int, reason DenyVoteReason) {
-	logger.printf(dVote, "S%v Denied vote to S%v because %v (T:%v -> T:%v)", voteFromId, voteToId, reason, voteFromTerm, voteToTerm)
-}
-
-/*************************************
-* client interaction events logging.
-**************************************/
-
-func (logger *Logger) logStartServer(serverId, currentTerm, logLength int) {
-	logger.printf(dClient, "S%v Started (T:%v LN:%v)", serverId, currentTerm, logLength)
-}
-
-func (logger *Logger) logClientRequest(serverId, currentTerm int, isLeader bool, commandIndex int, command interface{}) {
-	if isLeader {
-		if showCommand {
-			logger.printf(dClient, "S%v Accepted a client request at T:%v (CI:%v CMD:%v)", serverId, currentTerm, commandIndex, command)
-		} else {
-			logger.printf(dClient, "S%v Accepted a client request at T:%v (CI:%v)", serverId, currentTerm, commandIndex)
-		}
-	} else {
-		logger.printf(dClient, "S%v Refused a client request at T:%v", serverId, currentTerm)
-	}
-}
-
-func (logger *Logger) logApplyCommand(serverId, currentTerm int, state StateType, commandIndex int, command interface{}, lastApplied int) {
-	if showCommand {
-		logger.printf(dClient, "S%v Applied a command as %v at T:%v (CI:%v LA:%v CMD:%v)", serverId, state, currentTerm, commandIndex, lastApplied, command)
-	} else {
-		logger.printf(dClient, "S%v Applied a command as %v at T:%v (CI:%v LA:%v)", serverId, state, currentTerm, commandIndex, lastApplied)
-	}
-}
-
-/*************************************
-* log replication events logging.
-**************************************/
-
-func (logger *Logger) logAppendNewLog(serverId, currentTerm int, state StateType, beginIndex, newEntriesLength, logLength int) {
-	logger.printf(dReplicate, "S%v Appended new logs as %v at T:%v (BLI:%v EN:%v LN:%v)", serverId, state, currentTerm, beginIndex, newEntriesLength, logLength)
-}
-
-func (logger *Logger) logDetectNewLog(leaderId, serverId, newEntriesLength int) {
-	logger.printf(dReplicate, "S%v Detected %v new logs of S%v", leaderId, newEntriesLength, serverId)
-}
-
-func (logger *Logger) logSendNewLog(leaderID, serverId, currentTerm, prevLogIndex, prevLogTerm, newEntriesLength int) {
-	logger.printf(dReplicate, "S%v Send new logs to S%v at T:%v (PLI:%v PLT:%v EN:%v)", leaderID, serverId, currentTerm, prevLogIndex, prevLogTerm, newEntriesLength)
-}
-
-type ConsistencyCheckResult int
-
-const (
-	PASS ConsistencyCheckResult = iota // pass the consistency check.
-	NCTN                               // fail due to not contain a log with index args.PrevLogIndex.
-	TMIS                               // fail due to term mismatch.
-)
-
-func (logger *Logger) logConsistencyCheck(serverId int, result ConsistencyCheckResult) {
-	if showOnlyFailConsistencyCheck && result != PASS {
-		logger.printf(dReplicate, "S%v Checked log consistency with result %v", serverId, result)
-	} else if !showOnlyFailConsistencyCheck {
-		logger.printf(dReplicate, "S%v Checked log consistency with result %v", serverId, result)
-	}
-}
-
-func (logger *Logger) logHandleConflict(serverId, conflictIndex, deletedLogLength int) {
-	if conflictIndex > 0 {
-		logger.printf(dReplicate, "S%v Handled conflicts (LI:%v DN:%v)", serverId, conflictIndex, deletedLogLength)
-	} else {
-		logger.printf(dReplicate, "S%v Found no conflicts")
-	}
-}
-
-func (logger *Logger) logUpdateNextIndex(leaderId, serverId, oldNextIndex, newNextIndex int) {
-	logger.printf(dReplicate, "S%v Updated next index for S%v (NI:%v -> NI:%v)", leaderId, serverId, oldNextIndex, newNextIndex)
-}
-
-/*************************************
-* log commit events logging.
-**************************************/
-
-func (logger *Logger) logSetCommit(serverId int, state StateType, oldCommitIndex, newCommitIndex int) {
-	logger.printf(dCommit, "S%v Updated commit index as %v (CI:%v -> CI:%v)", serverId, state, oldCommitIndex, newCommitIndex)
-}
-
-func (logger *Logger) logNotifyMoreToApply(serverId, currentTerm, commitIndex, lastApplied int, state StateType) {
-	logger.printf(dCommit, "S%v Notified there're more to apply as %v at T:%v (CI:%v LA:%v)", serverId, state, currentTerm, commitIndex, lastApplied)
-}
-
-/*************************************
-* RPC communication events logging.
-**************************************/
-
-type RPCType int
-
-const (
-	HBET RPCType = iota // heartbeats.
-	AENT                // AppendEntries RPC conveying log entries.
-	RVOT                // RequestVote RPC.
-)
-
-func (logger *Logger) logSendMsg(sendFromId, sendToId, senderTerm int, state StateType, rpc RPCType) {
-	if showRPCCommunication {
-		logger.printf(dMsg, "S%v (T:%v %v) Send %v to S%v", sendFromId, senderTerm, state, rpc, sendToId)
-	}
-}
-
-func (logger *Logger) logReceiveMsgRequest(receiverId, senderId, receiverTerm, senderTerm int, state StateType, rpc RPCType) {
-	if showRPCCommunication {
-		logger.printf(dMsg, "S%v (T:%v %v) Received %v request from S%v (T:%v)", receiverId, receiverTerm, state, rpc, senderId, senderTerm)
-	}
-}
-
-func (logger *Logger) logReceiveMsgReply(receiverId, senderId, receiverTerm, senderTerm int, state StateType, rpc RPCType) {
-	if showRPCCommunication {
-		logger.printf(dMsg, "S%v (T:%v %v) Received %v reply from S%v (T:%v)", receiverId, receiverTerm, state, rpc, senderId, senderTerm)
-	}
-}
-
-/*************************************
-* reject RPC events logging.
-**************************************/
-
-// type RejectReason int
-
-// const (
-// 	STAL RejectReason = iota // the RPC is stale.
-// 	TCHG                     // term has changed since sending the RPC.
-// 	SCHG                     // state has changed since sending the RPC.
-// )
-
-// func (logger *Logger) logRejectRPCRequest(receiverId, senderId int, rpc RPCType, reason RejectReason) {
-// 	logger.printf(dReject, "S%v Rejected %v request from S%v because %v", receiverId, rpc, senderId, reason)
-// }
-
-// func (logger *Logger) logRejectRPCResponse(receiverId, senderId int, rpc RPCType, reason RejectReason) {
-// 	logger.printf(dReject, "S%v Rejected %v reply from S%v because %v", receiverId, rpc, senderId, reason)
-// }
-
-/*************************************
-* reset timer events logging.
-**************************************/
-
-type ResetTimerReason int
-
-const (
-	LEAD ResetTimerReason = iota // receive an AppendEntries RPC request from the current leader.
-	NELE                         // start a new election.
-	GVOT                         // grant a vote to another peer.
-)
-
-func (logger *Logger) logResetTimer(serverId, currentTerm int, state StateType, reason ResetTimerReason) {
-	if showResetTimer {
-		logger.printf(dTimer, "S%v Reset timer as %v at T:%v because %v", serverId, state, currentTerm, reason)
-	}
-}
-
-/*************************************
-* persistence events logging.
-**************************************/
-
-// func (logger *Logger) logBackup(serverId, currentTerm, votedFor int, log []pb.Entry) {
-// 	logger.printf(dPersist, "S%v Backed up (T:%v VF:%v LN:%v)", serverId, currentTerm, votedFor, len(log)-1)
-// 	if showLog {
-// 		for logIndex := 1; logIndex <= len(log)-1; logIndex++ {
-// 			logger.printf(dPersist, "LOG: %v:%v", logIndex, log[logIndex].Command)
-// 		}
-// 	}
-// }
-
-// func (logger *Logger) logRestore(serverId, currentTerm, votedFor int, log []pb.Entry) {
-// 	logger.printf(dPersist, "S%v Restored (T:%v VF:%v LN:%v)", serverId, currentTerm, votedFor, len(log)-1)
-// 	if showLog {
-// 		for logIndex := 1; logIndex <= len(log)-1; logIndex++ {
-// 			logger.printf(dPersist, "LOG: %v:%v", logIndex, log[logIndex].Command)
-// 		}
-// 	}
-// }
-
-/*************************************
-* snapshotting events logging.
-**************************************/
-
-func (logger *Logger) logReceiveSnapshotFromService(serverId, snapshotIndex int) {
-	logger.printf(dSnap, "S%v received a snapshot from service (SI: %v)", serverId, snapshotIndex)
-}
-
-func (logger *Logger) logSnapshotAt(serverId, snapshotIndex int) {
-	logger.printf(dSnap, "S%v snapshot at %v", serverId, snapshotIndex)
-}
-
-func (logger *Logger) logFindLaggedFollower(leaderId, followerId, leaderLastIncludedIndex, FollowerPrevLogIndex int) {
-	logger.printf(dSnap, "S%v found S%v lags behind (LII: %v PLI: %v)", leaderId, followerId, leaderLastIncludedIndex, FollowerPrevLogIndex)
-}
-
-func (logger *Logger) logSendSnapshotToFollower(leaderId, followerId, snapshotIndex int) {
-	logger.printf(dSnap, "S%v sent a snapshot to S%v (SI: %v)", leaderId, followerId, snapshotIndex)
-}
-
-func (logger *Logger) logFowardSnapshotToService(serverId, lastIncludedIndex, lastIncludedTerm int) {
-	logger.printf(dSnap, "S%v forward a snapshot to service (SI: %v ST: %v)", serverId, lastIncludedIndex, lastIncludedTerm)
-}
-
-func (logger *Logger) logCondInstallSnapshot(serverId, lastIncludedIndex, lastIncludedTerm int) {
-	logger.printf(dSnap, "S%v may install a snapshot (SI: %v ST: %v)", serverId, lastIncludedIndex, lastIncludedTerm)
-}
-
-/*************************************
-* helpers for logging.
-**************************************/
-
-// not delete this for backward compatibility.
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-// retrieve the verbosity level from an environment variable
-// VERBOSE=0/1/2/3 <=>
-func getVerbosityLevel() int {
-	v := os.Getenv("VERBOSE")
-	level := 0
-	if v != "" {
-		var err error
-		level, err = strconv.Atoi(v)
-		if err != nil {
-			log.Fatalf("Invalid verbosity %v", v)
-		}
-	}
-	return level
-}
-
-/*************************************
-* stringers for logging.
-**************************************/
-
-// StateType stringer.
-// func (state StateType) String() string {
-// 	switch state {
-// 	case Follower:
-// 		return "Follower"
-// 	case Candidate:
-// 		return "Candidate"
-// 	case Leader:
-// 		return "Leader"
-// 	default:
-// 		log.Fatal("unreachable")
-// 	}
-// 	return ""
-// }
-
-// DenyVoteReason stringer.
-func (reason DenyVoteReason) String() string {
-	switch reason {
-	case VOTH:
-		return "voted to other"
-	case UPTD:
-		return "has more up-to-date log"
-	default:
-		log.Fatal("unreachable")
-	}
-	return ""
-}
-
-// ConsistencyCheckResult stringer.
-func (result ConsistencyCheckResult) String() string {
-	switch result {
-	case PASS:
-		return "PASS"
-	case NCTN:
-		return "FAIL (not contain a log at given index)"
-	case TMIS:
-		return "FAIL (term mismatch)"
-	default:
-		log.Fatal("unreachable")
-	}
-	return ""
-}
-
-// RPCType stringer.
-func (rpc RPCType) String() string {
-	switch rpc {
-	case HBET:
-		return "HBET"
-	case AENT:
-		return "AENT"
-	case RVOT:
-		return "RVOT"
-	default:
-		log.Fatal("unreachable")
-	}
-	return ""
-}
-
-// func (reason RejectReason) String() string {
-// 	switch reason {
-// 	case STAL:
-// 		return "stale"
-// 	case TCHG:
-// 		return "term changed"
-// 	case SCHG:
-// 		return "state changed"
-// 	default:
-// 		log.Fatal("unreachable")
-// 	}
-// 	return ""
-// }
-
-func (reason ResetTimerReason) String() string {
-	switch reason {
-	case LEAD:
-		return "contacted with current leader"
-	case NELE:
-		return "started a new election"
-	case GVOT:
-		return "granted a vote"
-	default:
-		log.Fatal("unreachable")
-	}
-	return ""
 }

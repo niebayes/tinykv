@@ -63,6 +63,7 @@ type RaftLog struct {
 	stabled uint64
 
 	lastIncludedIndex uint64
+	lastIncludedTerm  uint64
 
 	// all entries that have not yet compact, i.e. not snapshoted.
 	// entries = stable log entries + unstable log entries.
@@ -71,9 +72,6 @@ type RaftLog struct {
 	// the incoming unstable snapshot, if any.
 	// (Used in 2C)
 	pendingSnapshot *pb.Snapshot
-
-	// used for logging to access the logger in raft.
-	r *Raft
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -84,6 +82,7 @@ func newLog(storage Storage) *RaftLog {
 		committed:         0,
 		applied:           0,
 		lastIncludedIndex: 0,
+		lastIncludedTerm:  0,
 		// append a dummy entry while init to simplify log indexing.
 		entries:         make([]pb.Entry, 1),
 		pendingSnapshot: &pb.Snapshot{},
@@ -96,18 +95,12 @@ func newLog(storage Storage) *RaftLog {
 	if err == nil {
 		stable_ents, _ := storage.Entries(fi, li+1)
 		raft_log.entries = append(raft_log.entries, stable_ents...)
-
-		raft_log.r.logger.restoreEnts(stable_ents)
 	}
 
 	// update stabled index since we may have restored some persisted entries from stable storage.
 	// note, commit index cannot be updated right now. Commit index is only updated when the leader
 	// notifies us that a quorum of nodes in the cluster has replicated these entries.
 	raft_log.stabled = raft_log.LastIndex()
-
-	if raft_log.stabled != 0 {
-		raft_log.r.logger.updateStabled(0)
-	}
 
 	return raft_log
 }
@@ -163,82 +156,26 @@ func (l *RaftLog) Len() uint64 {
 }
 
 // return (entry, nil) where the entry is the entry at index index if the entry exists. Otherwise, return (nil, error)
-func (l *RaftLog) Entry(index uint64) (*pb.Entry, error) {
-	if index < 1 {
+func (l *RaftLog) Entry(i uint64) (*pb.Entry, error) {
+	if i <= l.lastIncludedIndex || i > l.LastIndex() {
 		return nil, ErrIndexOutOfRange
 	}
-	offset := l.idx2off(index)
-	if offset >= l.Len() {
-		return nil, ErrIndexOutOfRange
-	}
+	offset := l.idx2off(i)
 	return &l.entries[offset], nil
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	if i > l.LastIndex() {
+	if i < l.lastIncludedIndex || i > l.LastIndex() {
 		return 0, ErrUnavailable
 	}
 
-	var term uint64
-	snapshot_index := uint64(0)
-	last_snapshot, err := l.storage.Snapshot()
-	if err == nil {
-		snapshot_index = last_snapshot.Metadata.Index
-		if i < snapshot_index {
-			// ErrSnapOutOfDate says the requested entry at the given index is older than the existing snapshot
-			// and so cannot be reached.
-			return 0, ErrSnapOutOfDate
-		} else if i == snapshot_index {
-			term = last_snapshot.Metadata.Term
-			return term, nil
-		}
+	if i == l.lastIncludedIndex {
+		return l.lastIncludedTerm, nil
 	}
 
-	offset := int(i - snapshot_index)
-	if offset < len(l.entries) {
-		term = l.entries[offset].Term
-		return term, nil
-	}
-
-	return 0, ErrUnavailable
-}
-
-// append the actually new entries that I don't have.
-// if all entries are stale or conflicting, return 0.
-// otherwise, return the index of last new entry.
-func (l *RaftLog) appendNewEntries(nents []*pb.Entry) uint64 {
-	// since followers simply duplicate the leader's log,
-	// and hence if an existing entry conflicts with the entries received from the leader,
-	// delete the conflicting entry and all entries follow it in followers.
-	for i := 0; i < len(nents); i++ {
-		nent := nents[i]                // leader's entry.
-		ent, err := l.Entry(nent.Index) // my entry.
-		// all entris before the conflict entry were appended to my log.
-		// all entries after and including the conflict entry needs to be appended to my log;
-		if err != nil || ent.Term != nent.Term {
-			if ent != nil && ent.Index <= l.committed {
-				panic(ErrDiscardCommitted)
-			}
-			if ent != nil {
-				// discard conflict entry and all follow it.
-				offset := l.idx2off(ent.Index)
-				l.r.logger.discardEnts(l.entries[offset:])
-				l.entries = l.entries[:offset]
-				// some stable entries may be discarded, so update stable index.
-				l.stabled = min(l.stabled, l.LastIndex())
-			}
-
-			// append new entries.
-			nents_clone := entsClone(nents[i:])
-			l.entries = append(l.entries, nents_clone...)
-
-			l.r.logger.appendEnts(nents_clone)
-
-			return l.LastIndex()
-		}
-	}
-	return 0
+	ent, _ := l.Entry(i)
+	return ent.Term, nil
 }
 
 // We need to compact the log entries in some point of time like

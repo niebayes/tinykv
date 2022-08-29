@@ -59,7 +59,6 @@ type Progress struct {
 
 type Raft struct {
 	id    uint64
-	peers []uint64
 
 	Term uint64
 	Vote uint64
@@ -129,9 +128,7 @@ func newRaft(c *Config) *Raft {
 	}
 
 	r := &Raft{
-		id: c.ID,
-		// FIXME: Shall I deep-copy the peers slice?
-		peers:               c.peers,
+		id:                  c.ID,
 		Term:                0,
 		Vote:                None,
 		RaftLog:             newLog(c.Storage),
@@ -145,17 +142,26 @@ func newRaft(c *Config) *Raft {
 		electionTimeoutBase: c.ElectionTick,
 		heartbeatElapsed:    0,
 		electionElapsed:     0,
-		// logger:              &DefaulLogger{},
 	}
 
 	// init logger.
-	r.logger = makeLogger(false, "raft.log")
-	r.RaftLog.r = r
+	r.logger = makeLogger(true, "raft.log")
+	r.logger.r = r
 
-	// init progress.
+	// init peer progress.
+	for _, id := range c.peers {
+		r.Prs[id] = &Progress{}
+	}
 	r.resetPeerProgress()
 
-	// recovery.
+	// check if there're some restored stable entries.
+	l := r.RaftLog
+	if l.stabled != 0 {
+		r.logger.restoreEnts(l.allEntries())
+		r.logger.updateStabled(0)
+	}
+
+	// restore persisted states.
 	hardstate, _, _ := c.Storage.InitialState()
 	r.Vote = hardstate.Vote
 	r.Term = hardstate.Term
@@ -197,8 +203,8 @@ func (r *Raft) tickElection() {
 		r.logger.elecTimeout()
 		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgHup,
-			From: r.id, 
-			To: r.id,
+			From:    r.id,
+			To:      r.id,
 		})
 	}
 }
@@ -211,8 +217,8 @@ func (r *Raft) tickHeartbeat() {
 		r.logger.beatTimeout()
 		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgBeat,
-			From: r.id, 
-			To: r.id,
+			From:    r.id,
+			To:      r.id,
 		})
 	}
 }
