@@ -875,10 +875,12 @@ func TestLeaderOnlyCommitsLogFromCurrentTerm2AB(t *testing.T) {
 		r.becomeCandidate()
 		r.becomeLeader()
 		r.readMessages()
-		// propose a entry to current term
+		// propose an entry to current term
 		r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 
-		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppendResponse, Term: r.Term, Index: tt.index})
+		// TODO: replace all MsgAppResp'Index with NextIndex.
+		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppendResponse, Term: r.Term, Index: tt.index,
+			NextIndex: tt.index + 1})
 		if r.RaftLog.committed != tt.wcommit {
 			t.Errorf("#%d: commit = %d, want %d", i, r.RaftLog.committed, tt.wcommit)
 		}
@@ -937,11 +939,11 @@ func acceptAndReply(m pb.Message) pb.Message {
 	}
 	// Note: reply message don't contain LogTerm
 	return pb.Message{
-		From:    m.To,
-		To:      m.From,
-		Term:    m.Term,
-		MsgType: pb.MessageType_MsgAppendResponse,
-		Index:   m.Index + uint64(len(m.Entries)),
+		From:      m.To,
+		To:        m.From,
+		Term:      m.Term,
+		MsgType:   pb.MessageType_MsgAppendResponse,
+		Index:     m.Index + uint64(len(m.Entries)),
 		NextIndex: m.Index + uint64(len(m.Entries)) + 1,
 		// FIXME: This is my modification.
 		// Entries: m.Entries,

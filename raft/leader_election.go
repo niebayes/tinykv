@@ -84,11 +84,16 @@ func (r *Raft) bcastRequestVote() {
 	for to := range r.Prs {
 		// skip myself.
 		if to != r.id {
+			l := r.RaftLog
+			lastLogIndex := l.LastIndex()
+			lastLogTerm, _ := l.Term(lastLogIndex)
 			r.forwardMsgUp(pb.Message{
 				MsgType: pb.MessageType_MsgRequestVote,
 				From:    r.id,
 				To:      to,
 				Term:    r.Term,
+				Index:   lastLogIndex,
+				LogTerm: lastLogTerm,
 			})
 		}
 	}
@@ -104,19 +109,10 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		r.becomeFollower(m.Term, m.From)
 	}
 
-	reject := true // reject granting the vote?
-	// grant vote only if he is not stale.
-	// FIXME: Shall check state? For e.g. only candidate or follower can grant vote?
-	if m.Term >= r.Term {
-		// r.Vote == req.From says: since the network may duplicate the RPC request,
-		// I have to vote for the same candidate once again if necessary.
-		if r.Vote == None || r.Vote == m.From {
-			r.Vote = m.From
-			reject = false
-		}
-	}
+	reject := !r.checkVoteRestriction(m)
 
 	if !reject {
+		r.Vote = m.From
 		r.logger.voteTo(m.From)
 	} else {
 		r.logger.rejectVoteTo(m.From)
@@ -212,6 +208,23 @@ func (r *Raft) resetElectionTimer() {
 	r.electionElapsed = 0
 	// raft introduces randomization into election timer to resolve split vote faster.
 	r.electionTimeout = r.electionTimeoutBase + (rand.Int() % r.electionTimeoutBase)
+}
+
+func (r *Raft) checkVoteRestriction(m pb.Message) bool {
+	if r.Vote == None || r.Vote == m.From {
+		// further restriction:
+		// only grant the vote iff the candidate's log is at least as up-to-date as my log.
+
+		// candidate's last log index and term.
+		lastLogIndex := m.Index
+		lastLogTerm := m.LogTerm
+		// my last log index and term.
+		l := r.RaftLog
+		li := l.LastIndex()
+		lt, _ := l.Term(li)
+		return (lastLogTerm > lt) || (lastLogTerm == lt && lastLogIndex >= li)
+	}
+	return false
 }
 
 // reset progress of each peer except this node itself.
