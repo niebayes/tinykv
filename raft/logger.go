@@ -11,6 +11,7 @@ import (
 
 // true to turn on debugging/logging.
 const debug = false
+const LOGTOFILE = false
 
 // what topic the log message is related to.
 // logs are organized by topics which further consists of events.
@@ -39,7 +40,7 @@ type Logger struct {
 
 func makeLogger(logToFile bool, logFileName string) *Logger {
 	logger := &Logger{}
-	logger.init(logToFile, logFileName)
+	logger.init(LOGTOFILE, logFileName)
 	return logger
 }
 
@@ -145,12 +146,12 @@ func (l *Logger) bcastRVOT() {
 
 func (l *Logger) recvRVOT(m pb.Message) {
 	r := l.r
-	l.printf(dElect, "N%v <- N%v RVOT", r.id, m.From)
+	l.printf(dElect, "N%v <- N%v RVOT (T:%v)", r.id, m.From, m.Term)
 }
 
 func (l *Logger) recvRVOTRes(m pb.Message) {
 	r := l.r
-	l.printf(dElect, "N%v <- N%v RVOT RES", r.id, m.From)
+	l.printf(dElect, "N%v <- N%v RVOT RES (T:%v R:%v)", r.id, m.From, m.Term, m.Reject)
 }
 
 func (l *Logger) voteTo(to uint64) {
@@ -180,7 +181,9 @@ func (l *Logger) stateToFollower(oldTerm uint64) {
 func (l *Logger) recvPROP(m pb.Message) {
 	r := l.r
 	l.printf(dReplicate, "N%v <- PROP (LN:%v)", r.id, len(m.Entries))
-	l.printEnts(dReplicate, r.id, entsClone(m.Entries))
+	for _, ent := range m.Entries {
+		l.printf(dReplicate, "N%v\t (D:%v)", r.id, string(ent.Data))
+	}
 }
 
 func (l *Logger) appendEnts(ents []pb.Entry) {
@@ -279,6 +282,6 @@ func (l *Logger) restoreEnts(ents []pb.Entry) {
 
 func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 	for _, ent := range ents {
-		l.printf(topic, "N%v \t(I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
+		l.printf(topic, "N%v\t(I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
 	}
 }

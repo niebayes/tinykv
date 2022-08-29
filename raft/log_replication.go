@@ -148,7 +148,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		oldCommitted := l.committed
 
 		// committed entries must be those entries that I have
-		l.committed = min(m.Commit, lastNewEntryIndex)
+		l.committed = min(m.Commit, max(lastNewEntryIndex, l.LastIndex()))
 
 		if l.committed != oldCommitted {
 			r.logger.updateCommitted(oldCommitted)
@@ -231,15 +231,21 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		// TODO: immediately send AppendEntries RPC to the peer.
 
 	} else {
-		pr.Next = max(pr.Next, m.Index+1) // the test suites are creepy.
+		// pr.Next = max(pr.Next, m.Index+1) // the test suites are creepy.
 		pr.Next = max(pr.Next, m.NextIndex)
 		pr.Match = pr.Next - 1
 	}
 	// next index cannot go beyond last index + 1.
 	l := r.RaftLog
-	pr.Next = max(pr.Next, l.LastIndex() + 1)
+	pr.Next = min(pr.Next, l.LastIndex()+1)
 
 	r.logger.updateProgOf(m.From, oldNext, oldMatch, pr.Next, pr.Match)
+
+	// if the next index is reduced, it means some conflicts occur and I immediately
+	// retry to let the follower quickly keep in sync with me.
+	if pr.Next < oldNext {
+		r.sendAppendEntries(m.From, false)
+	}
 
 	// if a majority of followers has not rejected the entries, the entries are committed in the leader.
 	if r.maybeUpdateCommitIndex() {
@@ -304,11 +310,26 @@ func entsClone(ents []*pb.Entry) []pb.Entry {
 	return ents_clone
 }
 
+func entDeepCopy(ent pb.Entry) pb.Entry {
+	ent_clone := pb.Entry{
+		EntryType: ent.EntryType,
+		Term:      ent.Term,
+		Index:     ent.Index,
+		Data:      ent.Data,
+	}
+	return ent_clone
+}
+
 // transform []pb.Entry to []*pb.Entry.
 func entsRef(ents []pb.Entry) []*pb.Entry {
 	ents_ref := make([]*pb.Entry, 0)
+	// note, ent here is like a box. Each iteration we place a different element
+	// into the box. But the &ent always return the address of the box, not the
+	// address of the element in the box.
+	// so becare of addressing in for loop in Go. Clone what you want to get address of .
 	for _, ent := range ents {
-		ents_ref = append(ents_ref, &ent)
+		ent_clone := entDeepCopy(ent)
+		ents_ref = append(ents_ref, &ent_clone)
 	}
 	return ents_ref
 }

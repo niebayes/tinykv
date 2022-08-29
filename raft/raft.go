@@ -145,7 +145,7 @@ func newRaft(c *Config) *Raft {
 	}
 
 	// init logger.
-	r.logger = makeLogger(false, "raft.log")
+	r.logger = makeLogger(true, "raft.log")
 	r.logger.r = r
 
 	// init peer progress.
