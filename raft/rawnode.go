@@ -175,6 +175,9 @@ func (rn *RawNode) HasReady() bool {
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
+// try to advance applied index if there're committed entries (not yet applied) ready to be applied.
+// try to advance stabled index if there're unstable entries to be persisted.
+// try to install a new snapshot if there's one pending snapshot.
 func (rn *RawNode) Advance(rd Ready) {
 	// committed entries were applied to the state machine.
 	l := rn.Raft.RaftLog
