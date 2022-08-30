@@ -165,7 +165,7 @@ func newRaft(c *Config) *Raft {
 	hardstate, _, _ := c.Storage.InitialState()
 	r.Vote = hardstate.Vote
 	r.Term = hardstate.Term
-	r.RaftLog.committed = hardstate.Commit
+	l.committed = hardstate.Commit
 	// TODO: restore persisted log from snapshot.
 
 	r.logger.startRaft()

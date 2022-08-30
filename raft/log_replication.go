@@ -540,3 +540,22 @@ func (r *Raft) tryUpdateCommitted(committed, lastNewEntryIndex uint64) {
 		r.logger.updateCommitted(oldCommitted)
 	}
 }
+
+func (r *Raft) tryUpdateApplied(applied uint64) {
+	l := r.RaftLog
+	if applied < l.applied || applied > l.committed {
+		panic("invariant: applied <= committed and applied never decreases.")
+	}
+	// applied index never decreases.
+	oldApplied := l.applied
+	l.applied = applied
+	r.logger.updateApplied(oldApplied)
+}
+
+func (r *Raft) tryUpdateStabled(stabled uint64) {
+	l := r.RaftLog
+	// FIXME: Can stabled index decrease?
+	oldStabled := l.stabled
+	l.stabled = stabled
+	r.logger.updateStabled(oldStabled)
+}

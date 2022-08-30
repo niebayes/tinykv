@@ -117,10 +117,18 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 }
 
 // nextEnts returns all the committed but not applied entries
-func (l *RaftLog) nextEnts() (ents []pb.Entry) {
-	// TODO: Add error handling.
-	begin := l.idx2off(l.applied + 1)
-	end := l.idx2off(l.committed)
+func (l *RaftLog) nextEnts() []pb.Entry {
+	ents := l.allEntries()
+	if len(ents) == 0 {
+		return nil
+	}
+	begin := max(l.applied+1, ents[0].Index)
+	end := min(l.committed, l.LastIndex())
+	if begin > end {
+		return nil
+	}
+	begin = l.idx2off(begin)
+	end = l.idx2off(end)
 	// note, slicing in Go is half open, i.e. left included, right excluded.
 	return l.entries[begin : end+1]
 }
@@ -133,6 +141,20 @@ func (l *RaftLog) sliceStartAt(i uint64) []pb.Entry {
 
 	offset := l.idx2off(i)
 	return l.entries[offset:]
+}
+
+func (l *RaftLog) sliceEndAt(i uint64) []pb.Entry {
+	if i <= l.lastIncludedIndex {
+		return nil
+	}
+	ents := l.allEntries()
+	if len(ents) == 0 || i < ents[0].Index {
+		return nil
+	}
+	// note, slice is Go is left closed and right open.
+	i = min(i, l.LastIndex())
+	offset := l.idx2off(i)
+	return ents[:offset+1]
 }
 
 // LastIndex return the last index of the log entries
@@ -183,4 +205,8 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+}
+
+func (l *RaftLog) hasPendingSnapshot() bool {
+	return l.pendingSnapshot != nil && len(l.pendingSnapshot.Data) > 0
 }

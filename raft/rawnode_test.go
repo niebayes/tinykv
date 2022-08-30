@@ -184,6 +184,7 @@ func TestRawNodeStart2AC(t *testing.T) {
 	}
 }
 
+// TestRawNodeRestart2AC ensures that a node restore hardstate from stable storage on init.
 func TestRawNodeRestart2AC(t *testing.T) {
 	entries := []pb.Entry{
 		{Term: 1, Index: 1},

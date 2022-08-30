@@ -49,14 +49,18 @@ type Ready struct {
 
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
+	// I.e. Entries = unstable entries.
 	Entries []pb.Entry
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
 	Snapshot pb.Snapshot
 
-	// CommittedEntries specifies entries to be committed to a
+	// CommittedEntries specifies entries to be applied to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
+	// note, committed entries do not contain applied entries.
+	// i.e. committed entries = entries[applied+1 : committed+1]
+	// note, slicing in Go is left closed and right open.
 	CommittedEntries []pb.Entry
 
 	// Messages specifies outbound messages to be sent AFTER Entries are
@@ -69,13 +73,14 @@ type Ready struct {
 // RawNode is a wrapper of Raft.
 type RawNode struct {
 	Raft *Raft
-	// Your Data Here (2A).
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
-func NewRawNode(config *Config) (*RawNode, error) {
-	// Your Code Here (2A).
-	return nil, nil
+func NewRawNode(cfg *Config) (*RawNode, error) {
+	rn := &RawNode{
+		Raft: newRaft(cfg),
+	}
+	return rn, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -142,20 +147,50 @@ func (rn *RawNode) Step(m pb.Message) error {
 
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
-	// Your Code Here (2A).
-	return Ready{}
+	rd := Ready{}
+	l := rn.Raft.RaftLog
+	rd.Entries = l.unstableEntries()
+	rd.CommittedEntries = l.nextEnts()
+	rd.Messages = rn.Raft.msgs
+	// to fit into the creepy tests.
+	if len(rd.Messages) == 0 {
+		rd.Messages = nil
+	}
+	// FIXME: Only populate the snapshot box when there's a pending snapshot?
+	// note, pb.Snapshot id a box and whenever you have a new snapshot,
+	// replace the content of the box with the new snapshot. So Snapshot
+	// always return a nil error.
+	// snapshot, _ := l.storage.Snapshot()
+	// rd.Snapshot = snapshot
+	return rd
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
+// i.e. if there're entries to be stabled, if there're entries to be applied,
+// or if there're snapshot to be installed.
 func (rn *RawNode) HasReady() bool {
-	// Your Code Here (2A).
-	return false
+	l := rn.Raft.RaftLog
+	return len(l.unstableEntries()) > 0 || len(l.nextEnts()) > 0 || l.hasPendingSnapshot()
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
-	// Your Code Here (2A).
+	// committed entries were applied to the state machine.
+	l := rn.Raft.RaftLog
+	// note, no need to check rd.CommittedEntries != nil, since len(nil) returns 0.
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.tryUpdateApplied(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
+	}
+	// unstable entries were persisted to the stable storage.
+	if len(rd.Entries) > 0 {
+		rn.Raft.tryUpdateStabled(rd.Entries[len(rd.Entries)-1].Index)
+	}
+	// FIXME: How to check if there's a snapshot?
+	if rd.Snapshot.Data != nil {
+		l.lastIncludedIndex = rd.Snapshot.Metadata.Index
+		l.lastIncludedTerm = rd.Snapshot.Metadata.Term
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
