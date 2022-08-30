@@ -19,11 +19,17 @@ package raft
 
 import (
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"sort"
 )
 
 // handle MsgPropose message.
 func (r *Raft) handlePropose(m pb.Message) {
 	r.logger.recvPROP(m)
+
+	// ignore the proposal if no entries.
+	if len(m.Entries) == 0 {
+		return
+	}
 
 	// annotate entries with the current term and the corresponding index.
 	li := r.RaftLog.LastIndex()
@@ -55,7 +61,10 @@ func (r *Raft) handlePropose(m pb.Message) {
 func (r *Raft) bcastAppendEntries(must bool) {
 	r.logger.bcastAENT()
 
-	for to := range r.Prs {
+	// note, the order of iterating map in Go is not determined.
+	// someone says raft would be more stable if the bcast order is determined.
+	ids := r.idsFromPrs()
+	for _, to := range ids {
 		if to != r.id {
 			r.sendAppendEntries(to, true)
 		}
@@ -144,19 +153,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	// the new entries are not rejected if passed the log consistency check.
 	// but some of them may be stale, some of them may have conflict,
 	// so I have to skip conflicts and append the actually new entries which I don't have.
-	lastNewEntryIndex := r.appendNewEntries(m.Entries)
+	lastNewEntryIndex := r.appendNewEntries(prevLogIndex, m.Entries)
 
 	// update commit index.
-	if m.Commit > l.committed {
-		oldCommitted := l.committed
-
-		// committed entries must be those entries that I have
-		l.committed = min(m.Commit, max(lastNewEntryIndex, l.LastIndex()))
-
-		if l.committed != oldCommitted {
-			r.logger.updateCommitted(oldCommitted)
-		}
-	}
+	r.tryUpdateCommitted(m.Commit, lastNewEntryIndex)
 
 	r.forwardMsgUp(pb.Message{
 		MsgType:   pb.MessageType_MsgAppendResponse,
@@ -257,47 +257,87 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	}
 }
 
+// broadcast Heartbeat RPC to all other peers in the cluster.
 func (r *Raft) bcastHeartbeat() {
 	r.logger.bcastHBET()
 
-	for to := range r.Prs {
+	ids := r.idsFromPrs()
+	for _, to := range ids {
 		if to != r.id {
-			r.sendHeartbeat(to)
+			// matchIndex is used for safety. It is a conservative measurement of what prefix of the log
+			// the leader shares with a given follower.
+			// it only gets updated when a follower positively acknowledges an AppendEntries RPC.
+			// if the follower is slow or it recently joins the cluster or it was partitioned and then rejoined,
+			// the follower's match index might be very small while the leader's commit index might be very large instead.
+			// so to ensure that leader and followers make a consensus on the log entries, we cannot simply
+			// pass leader's commit to the follower. Instead, we have to conservatively update the commit index
+			// the same as we update the match index of this follower.
+			l := r.RaftLog
+			pr := r.Prs[to]
+			commit := min(l.committed, pr.Match)
+
+			r.forwardMsgUp(pb.Message{
+				MsgType: pb.MessageType_MsgHeartbeat,
+				To:      to,
+				From:    r.id,
+				Term:    r.Term,
+				Commit:  commit,
+			})
 		}
 	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
-	// step down if I'm stale.
-	if m.Term > r.Term {
-		r.becomeFollower(m.Term, m.From)
-	}
+	r.logger.recvHBET(m)
 
-	// reject if the from node is stale.
-	reject := false
+	// drop stale msgs.
 	if m.Term < r.Term {
-		reject = true
+		return
 	}
 
-	if !reject {
-		// I admit the from node is the current leader, so I step down and reset election timer
-		// to not compete with him.
-		r.becomeFollower(m.Term, m.From)
-		r.resetElectionTimer()
-	}
+	// I admit the from node is the current leader, so I step down and reset election timer
+	// to not compete with him.
+	r.becomeFollower(m.Term, m.From)
+	r.resetElectionTimer()
+
+	// update commit index.
+	r.tryUpdateCommitted(m.Commit, r.RaftLog.LastIndex())
 
 	// send the response.
 	r.forwardMsgUp(pb.Message{
-		MsgType: pb.MessageType_MsgAppendResponse,
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		To:      m.From,
 		From:    r.id,
-		Reject:  reject,
+		Term:    r.Term,
 	})
 }
 
 // handle Heartbeat RPC response.
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
+	// reject stale msgs.
+	if m.Term < r.Term {
+		return
+	}
+
+	// step down if I'm stale.
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, m.From)
+		return
+	}
+
+	l := r.RaftLog
+	pr, ok := r.Prs[m.From]
+	if !ok {
+		return
+	}
+
+	// now, I know this peer is alive but I don't know if it catches up.
+	// if in my view, it does not catch up with me, I immediately send entries
+	// I think it needs.
+	if pr.Match < l.LastIndex() {
+		r.sendAppendEntries(m.From, true)
+	}
 }
 
 //
@@ -313,6 +353,7 @@ func entsClone(ents []*pb.Entry) []pb.Entry {
 	return ents_clone
 }
 
+// return a deep copy of the entry ent.
 func entDeepCopy(ent pb.Entry) pb.Entry {
 	ent_clone := pb.Entry{
 		EntryType: ent.EntryType,
@@ -337,6 +378,16 @@ func entsRef(ents []pb.Entry) []*pb.Entry {
 	return ents_ref
 }
 
+// return an array of peer ids. Note the array is sorted in ascending order.
+func (r *Raft) idsFromPrs() []uint64 {
+	ids := make([]uint64, 0)
+	for id := range r.Prs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
 // the entries ents are appended whatsoever.
 func (r *Raft) appendEntries(ents []*pb.Entry) {
 	l := r.RaftLog
@@ -348,8 +399,9 @@ func (r *Raft) appendEntries(ents []*pb.Entry) {
 // append the actually new entries that I don't have.
 // if all entries are stale or conflicting, return 0.
 // otherwise, return the index of last new entry.
-func (r *Raft) appendNewEntries(nents []*pb.Entry) uint64 {
+func (r *Raft) appendNewEntries(prevLogIndex uint64, nents []*pb.Entry) uint64 {
 	l := r.RaftLog
+	lastNewEntryIndex := prevLogIndex + uint64(len(nents))
 
 	// since followers simply duplicate the leader's log,
 	// and hence if an existing entry conflicts with the entries received from the leader,
@@ -378,10 +430,10 @@ func (r *Raft) appendNewEntries(nents []*pb.Entry) uint64 {
 
 			r.logger.appendEnts(nents_clone)
 
-			return l.LastIndex()
+			return lastNewEntryIndex
 		}
 	}
-	return 0
+	return lastNewEntryIndex
 }
 
 func (r *Raft) checkQuorumAppend(index uint64) bool {
@@ -455,27 +507,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	return true
 }
 
-func (r *Raft) makeHeartbeat(to uint64) pb.Message {
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgHeartbeat,
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-		// heartbeat conveys empty entries.
-		// the test suites require it to be nil rather than empty slice
-		Entries: nil,
-		Index:   0,
-		LogTerm: 0,
-	}
-	return msg
-}
-
-// sendHeartbeat sends a heartbeat RPC to the given peer.
-func (r *Raft) sendHeartbeat(to uint64) {
-	m := r.makeHeartbeat(to)
-	r.forwardMsgUp(m)
-}
-
+// update leader's own progress as test cases require.
 func (r *Raft) updateLeaderProg() {
 	l := r.RaftLog
 	pr := r.Prs[r.id]
@@ -488,4 +520,23 @@ func (r *Raft) updateLeaderProg() {
 	pr.Match = max(pr.Match, pr.Next-1)
 
 	r.logger.updateProgOf(r.id, oldNext, oldMatch, pr.Next, pr.Match)
+}
+
+func (r *Raft) tryUpdateCommitted(committed, lastNewEntryIndex uint64) {
+	l := r.RaftLog
+	if committed <= l.committed {
+		return
+	}
+
+	oldCommitted := l.committed
+
+	// committed entries must be those entries that I have
+	l.committed = min(committed, lastNewEntryIndex)
+	if l.committed < oldCommitted {
+		panic("decrease commit index")
+	}
+
+	if l.committed != oldCommitted {
+		r.logger.updateCommitted(oldCommitted)
+	}
 }

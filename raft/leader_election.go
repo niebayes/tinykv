@@ -81,7 +81,8 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) bcastRequestVote() {
 	r.logger.bcastRVOT()
 
-	for to := range r.Prs {
+	ids := r.idsFromPrs()
+	for _, to := range ids {
 		// skip myself.
 		if to != r.id {
 			l := r.RaftLog
@@ -103,10 +104,10 @@ func (r *Raft) bcastRequestVote() {
 func (r *Raft) handleRequestVote(m pb.Message) {
 	r.logger.recvRVOT(m)
 
-	// if I'm stale, keep pace with the candidate.
+	// step down if I'm stale.
 	if m.Term > r.Term {
-		// update my term, since
-		r.becomeFollower(m.Term, m.From)
+		// the from node is a candidate currently, so I don't know who is the leader.
+		r.becomeFollower(m.Term, None)
 	}
 
 	reject := !r.checkVoteRestriction(m)
@@ -183,6 +184,7 @@ func (r *Raft) becomeLeader() {
 	r.resetVoteRecord()
 	r.resetPeerProgress()
 	r.State = StateLeader
+	r.Lead = r.id
 
 	// upon becoming a new leader, broadcast a no-op entry to claim the leadership
 	// and keep other nodes' log in sync.

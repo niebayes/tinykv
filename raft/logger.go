@@ -255,9 +255,18 @@ func (l *Logger) recvAENTRes(m pb.Message) {
 	l.printf(dReplicate, "N%v <- N%v AENT RES (T:%v R:%v RR:%v NI:%v CT:%v)", r.id, m.From, m.Term, m.Reject, m.Reason, m.NextIndex, m.ConflictTerm)
 }
 
+//
+// heartbeat events.
+//
+
 func (l *Logger) recvBEAT() {
 	r := l.r
 	l.printf(dReplicate, "N%v <- BEAT", r.id)
+}
+
+func (l *Logger) recvHBET(m pb.Message) {
+	r := l.r
+	l.printf(dReplicate, "N%v <- BEAT (T:%v CI:%v)", r.id, m.Term, m.Commit)
 }
 
 func (l *Logger) bcastHBET() {
