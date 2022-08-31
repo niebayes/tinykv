@@ -53,10 +53,21 @@ func NewCluster(count int, schedulerClient *MockSchedulerClient, simulator Simul
 	}
 }
 
+// start a cluster of stores.
+// store: an instace of tinykv-server.
+// peer: a raft node running on a store.
+// region: a collection of peers, aka. raft group.
+//	note, in project2b, each store has only one peer and hence this cluster contains only one region.
 func (c *Cluster) Start() {
 	ctx := context.TODO()
 	clusterID := c.schedulerClient.GetClusterID(ctx)
 
+	// create the back dbs for each store.
+	// each raftstore has three dbs: kvdb, raftdb and snapdb.
+	// raftdb stores raft log and RaftLocalState
+	// kvdb stores key-value data in different column families, RegionLocalState and RaftApplyState.
+	// 	 You can regard kvdb as the state machine mentioned in Raft paper
+	// snapdb stores snapshots.
 	for storeID := uint64(1); storeID <= uint64(c.count); storeID++ {
 		dbPath, err := ioutil.TempDir("", c.baseDir)
 		if err != nil {
@@ -87,6 +98,11 @@ func (c *Cluster) Start() {
 		c.engines[storeID] = engine
 	}
 
+	// note, var names with prefix metapb are metadata of the corresponding actual struct.
+	// note, functions having names `bootstrap` are functions used to persist metadatas.
+
+	// this region is the first region, also it's the only region in the cluster, since project2b
+	// restricts and each store has only one peer and hence there's only region in the cluster.
 	regionEpoch := &metapb.RegionEpoch{
 		Version: raftstore.InitEpochVer,
 		ConfVer: raftstore.InitEpochConfVer,
@@ -98,19 +114,25 @@ func (c *Cluster) Start() {
 		RegionEpoch: regionEpoch,
 	}
 
+	// create a peer for each store.
 	for storeID, engine := range c.engines {
 		peer := NewPeer(storeID, storeID)
+		// associate these peers with the region.
 		firstRegion.Peers = append(firstRegion.Peers, peer)
+		// ensure the backed dbs for each store are empty.
+		// and persist cluster id and store id to the backed db.
 		err := raftstore.BootstrapStore(engine, clusterID, storeID)
 		if err != nil {
 			panic(err)
 		}
 	}
 
+	// persist the metadata of this region to back dbs of all stores.
 	for _, engine := range c.engines {
 		raftstore.PrepareBootstrapCluster(engine, firstRegion)
 	}
 
+	// bootstrap a mock scheduler on the given store.
 	store := &metapb.Store{
 		Id:      1,
 		Address: "",
@@ -123,6 +145,7 @@ func (c *Cluster) Start() {
 		panic(resp.Header.Error)
 	}
 
+	// associate stores with the scheduler.
 	for storeID, engine := range c.engines {
 		store := &metapb.Store{
 			Id:      storeID,
@@ -132,6 +155,8 @@ func (c *Cluster) Start() {
 		if err != nil {
 			panic(err)
 		}
+		// when the boostrap state key is removed, the store would not
+		// find this key upon restarting, so it knows this store have been bootstrapped.
 		raftstore.ClearPrepareBootstrapState(engine)
 	}
 

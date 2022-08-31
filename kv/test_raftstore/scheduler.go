@@ -59,6 +59,7 @@ type OpTransferLeader struct {
 	peer *metapb.Peer
 }
 
+// the store struct used in scheduler.
 type Store struct {
 	store                    metapb.Store
 	heartbeatResponseHandler func(*schedulerpb.RegionHeartbeatResponse)
@@ -121,6 +122,7 @@ func (m *MockSchedulerClient) AllocID(ctx context.Context) (uint64, error) {
 	return ret, nil
 }
 
+// bootstrap the cluster on the given store store.
 func (m *MockSchedulerClient) Bootstrap(ctx context.Context, store *metapb.Store) (*schedulerpb.BootstrapResponse, error) {
 	m.Lock()
 	defer m.Unlock()

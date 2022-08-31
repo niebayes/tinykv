@@ -28,6 +28,7 @@ type ApplySnapResult struct {
 	Region     *metapb.Region
 }
 
+// FIXME: What is the purpose of this statement
 var _ raft.Storage = new(PeerStorage)
 
 type PeerStorage struct {

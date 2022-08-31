@@ -301,6 +301,7 @@ func (bs *Raftstore) shutDown() {
 }
 
 func CreateRaftstore(cfg *config.Config) (*RaftstoreRouter, *Raftstore) {
+	// storeReceiver is in storeState.
 	storeSender, storeState := newStoreState(cfg)
 	router := newRouter(storeSender)
 	raftstore := &Raftstore{

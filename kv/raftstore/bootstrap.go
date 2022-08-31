@@ -37,6 +37,9 @@ func isRangeEmpty(engine *badger.DB, startKey, endKey []byte) (bool, error) {
 	return !hasData, err
 }
 
+// ensure the kvdb and raftdb are all empty initially.
+// associate the global var meta.StoreIdentKey with a StoreIdent struct, so that upon restarting,
+// the cluster id and store id can be recoverd using the global var (its value is static).
 func BootstrapStore(engines *engine_util.Engines, clusterID, storeID uint64) error {
 	ident := new(rspb.StoreIdent)
 	empty, err := isRangeEmpty(engines.Kv, meta.MinKey, meta.MaxKey)
@@ -55,6 +58,7 @@ func BootstrapStore(engines *engine_util.Engines, clusterID, storeID uint64) err
 	}
 	ident.ClusterId = clusterID
 	ident.StoreId = storeID
+	// note, meta.StoreIdentKey is a global var.
 	err = engine_util.PutMeta(engines.Kv, meta.StoreIdentKey, ident)
 	if err != nil {
 		return err
@@ -85,17 +89,33 @@ func PrepareBootstrap(engines *engine_util.Engines, storeID, regionID, peerID ui
 	return region, nil
 }
 
+// persist some metadata so that upon restarting, these metadata could be restored using the corresponding
+// global vars (which are used as the keys in the db).
+// write initial RegionLocalState to kvdb.
+// write initial RaftApplyState to raftdb.
+// write initial RaftLocalState to raftdb.
+//
+// RaftLocalState: Used to store HardState of the current Raft and the last Log Index.
+// RaftApplyState: Used to store the last Log index that Raft applies and some truncated Log information.
+// RegionLocalState: Used to store Region information and the corresponding Peer state on this Store.
+//			Normal indicates that this Peer is normal.
+//      Tombstone shows that this Peer has been removed from Region and cannot join in Raft Group.
 func PrepareBootstrapCluster(engines *engine_util.Engines, region *metapb.Region) error {
+	// persist RegionLocalState.
 	state := new(rspb.RegionLocalState)
 	state.Region = region
 	kvWB := new(engine_util.WriteBatch)
 	kvWB.SetMeta(meta.PrepareBootstrapKey, state)
 	kvWB.SetMeta(meta.RegionStateKey(region.Id), state)
+
+	// persist RaftApplyState.
 	writeInitialApplyState(kvWB, region.Id)
 	err := engines.WriteKV(kvWB)
 	if err != nil {
 		return err
 	}
+
+	// persist RaftLocalState.
 	raftWB := new(engine_util.WriteBatch)
 	writeInitialRaftState(raftWB, region.Id)
 	err = engines.WriteRaft(raftWB)

@@ -6,7 +6,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 )
 
-// raftWorker is responsible for run raft commands and apply raft logs.
+// raftWorker is responsible for running raft commands and apply raft logs.
 type raftWorker struct {
 	pr *router
 
@@ -30,6 +30,8 @@ func newRaftWorker(ctx *GlobalContext, pm *router) *raftWorker {
 // run runs raft commands.
 // On each loop, raft commands are batched by channel buffer.
 // After commands are handled, we collect apply messages by peers, make a applyBatch, send it to apply channel.
+// 
+// sync.WaiyGroup waits for a collection of goroutines to finish.
 func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var msgs []message.Msg
@@ -41,6 +43,7 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 		case msg := <-rw.raftCh:
 			msgs = append(msgs, msg)
 		}
+		// len returns the buffer size of the channel.
 		pending := len(rw.raftCh)
 		for i := 0; i < pending; i++ {
 			msgs = append(msgs, <-rw.raftCh)

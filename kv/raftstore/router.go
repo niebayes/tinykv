@@ -19,11 +19,15 @@ type peerState struct {
 
 // router routes a message to a peer.
 type router struct {
+	// sync.Map: concurrent-safe map
 	peers       sync.Map // regionID -> peerState
 	peerSender  chan message.Msg
 	storeSender chan<- message.Msg
 }
 
+// router is a conduit through which the store (a tiny-kv sever instance) communicates (using msgs)
+// with the raftstore.
+// the store sends msgs to the storeSender channel and raftstore fetches msgs from the storeReceiver channel.
 func newRouter(storeSender chan<- message.Msg) *router {
 	pm := &router{
 		peerSender:  make(chan message.Msg, 40960),
