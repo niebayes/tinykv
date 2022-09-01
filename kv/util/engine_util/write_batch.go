@@ -10,6 +10,7 @@ import (
 )
 
 type WriteBatch struct {
+	// note, if the first letter of the name of a field/method is in lowercase, then this field is private.
 	entries []*badger.Entry // the entries are placed in a linear array.
 
 	// fields below are used for stuff corresponding to safe point.
@@ -51,6 +52,7 @@ func (wb *WriteBatch) DeleteCF(cf string, key []byte) {
 	wb.size += len(key)
 }
 
+// append a Put operation to the batch of writes where the key is of type []byte.
 func (wb *WriteBatch) SetMeta(key []byte, msg proto.Message) error {
 	val, err := proto.Marshal(msg)
 	if err != nil {
@@ -64,6 +66,7 @@ func (wb *WriteBatch) SetMeta(key []byte, msg proto.Message) error {
 	return nil
 }
 
+// append a Delete operation to the batch of writes where the key is of type []byte.
 func (wb *WriteBatch) DeleteMeta(key []byte) {
 	wb.entries = append(wb.entries, &badger.Entry{
 		Key: key,
