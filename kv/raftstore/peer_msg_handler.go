@@ -9,6 +9,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
@@ -38,11 +39,66 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
+// hints: 
+// (1) Each raft cmd is the data of a raft log entry. You shall use `msg.Marshall()` to marshall a raft cmd to []byte and wrap it to the data field 
+// of a raft log entry. Then propose the log entry to the raft module. When a log entry `ent` is applied, it shall be unmarshalled by calling `ent.Unmarshall()`, 
+// and then get processed by the state machine according to its command type. 
+// (2) Each raft cmd corresponds to one proposal. There defines a `proposals` field in `peer` struct and you shall 
+// interact with it both in `proposeRaftCommand` and `HandleRaftReady`. There also defines some helper functions you may need in `kv/raftstore/peer.go`.
+// (3) Keep in mind to handling errors in `proposeRaftCommand` and `HandleRaftReady`. Refer to `kv/raftstore/util/errors.go` for what errors you shall 
+// handle, and refer to `kv/raftstore/cmd_resp.go` for how to binding these errors to `Resp` in `message.Callback`.
+// (4) For this part and subsequent parts, an unreliable mock network is used as the testing environment. There might still have some flaws in your implementation 
+// even if you've passed one run of the tests. To ensure your implementation is correct, you shall run the tests multiple times. The great MIT 6.824 course has 
+// provided a [python script](https://blog.josejg.com/debugging-pretty/) for running multiple run of tests in parallel. It also provides a python script for prettifying 
+// your log output. You may need to learn the script and adjust your logging format to make the script works correctly.
+func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	// check if we can propose this raft cmd.
+	err := d.preProposeRaftCommand(msg)
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+}
+
+// HandleRaftReady should get the ready from Raft module and do corresponding actions like
+// persisting log entries, applying committed entries and sending raft messages to other peers through the network.
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
-	// Your Code Here (2B).
+
+	// get the raw node of the peer.
+	rn := d.peer.RaftGroup
+	if !rn.HasReady() {
+		return
+	}
+
+	// get ready states.
+	rd := rn.Ready()
+
+	// persist ready states.
+	// TODO: handle applySnapRes.
+	_, err := d.peerStorage.SaveReadyState(&rd)
+	if err != nil {
+		// fixme: shall i panic?
+		panic(err)
+	}
+
+	// send raft msgs.
+	for _, m := range rd.Messages {
+		d.peer.sendRaftMessage(m, d.ctx.trans)
+	}
+
+	// apply committed entries, i.e. input the log entries to the state machine, i.e. the kvdb.
+	kvWB := new(engine_util.WriteBatch)
+	// for _, ent := range rd.CommittedEntries {
+
+	// }
+	err = kvWB.WriteToDB(d.ctx.engine.Kv)
+	if err != nil {
+		// fixme: shall i panic?
+		panic(err)
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -105,16 +161,6 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 		return errEpochNotMatching
 	}
 	return err
-}
-
-func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	// check if we can propose this raft cmd.
-	err := d.preProposeRaftCommand(msg)
-	if err != nil {
-		cb.Done(ErrResp(err))
-		return
-	}
-	// Your Code Here (2B).
 }
 
 func (d *peerMsgHandler) onTick() {
