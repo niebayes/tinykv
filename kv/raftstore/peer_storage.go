@@ -323,6 +323,11 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 		return nil
 	}
 
+	firstNewEntryIndex := entries[0].Index
+	if firstNewEntryIndex <= ps.raftState.HardState.Commit {
+		return errors.New("entries must be uncommitted entries")
+	}
+
 	// each append is interpreted as a Put operation in the batch of write.
 	// append new log entries to the stable storage and resolve the conflicts by replacing.
 	for _, ent := range entries {
@@ -368,7 +373,10 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// persist unstable entries and update RaftLocalState.
 	raftWB := new(engine_util.WriteBatch)
-	ps.Append(ready.Entries, raftWB)
+	err := ps.Append(ready.Entries, raftWB)
+	if err != nil {
+		return nil, err
+	}
 
 	// update HardState (term, vote, commit) in RaftLocalState.
 	ps.raftState.HardState = &ready.HardState
