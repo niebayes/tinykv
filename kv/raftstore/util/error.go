@@ -9,8 +9,11 @@ import (
 )
 
 type ErrNotLeader struct {
+	// my region id through which the client could find other peers in the region, and
+	// send raft cmds to them.
 	RegionId uint64
-	Leader   *metapb.Peer
+	// the peer I think it's the current leader. It acts as a hint for the client to find the correct leader.
+	Leader *metapb.Peer
 }
 
 func (e *ErrNotLeader) Error() string {

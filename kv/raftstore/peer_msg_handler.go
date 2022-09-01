@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Connor1996/badger/y"
+	"github.com/golang/protobuf/proto"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
@@ -39,23 +40,73 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
-// hints: 
-// (1) Each raft cmd is the data of a raft log entry. You shall use `msg.Marshall()` to marshall a raft cmd to []byte and wrap it to the data field 
-// of a raft log entry. Then propose the log entry to the raft module. When a log entry `ent` is applied, it shall be unmarshalled by calling `ent.Unmarshall()`, 
-// and then get processed by the state machine according to its command type. 
-// (2) Each raft cmd corresponds to one proposal. There defines a `proposals` field in `peer` struct and you shall 
+// hints:
+// (1) Each raft cmd is the data of a raft log entry. You shall use `msg.Marshal()` to marshall a raft cmd to []byte and wrap it to the data field
+// of a raft log entry. Then propose the log entry to the raft module. When a log entry `ent` is applied, it shall be unmarshalled by calling `ent.Unmarshal()`,
+// and then get processed by the state machine according to its command type.
+// (2) Each raft cmd corresponds to one proposal. There defines a `proposals` field in `peer` struct and you shall
 // interact with it both in `proposeRaftCommand` and `HandleRaftReady`. There also defines some helper functions you may need in `kv/raftstore/peer.go`.
-// (3) Keep in mind to handling errors in `proposeRaftCommand` and `HandleRaftReady`. Refer to `kv/raftstore/util/errors.go` for what errors you shall 
+// (3) Keep in mind to handle errors in `proposeRaftCommand` and `HandleRaftReady`. Refer to `kv/raftstore/util/errors.go` for what errors you shall
 // handle, and refer to `kv/raftstore/cmd_resp.go` for how to binding these errors to `Resp` in `message.Callback`.
-// (4) For this part and subsequent parts, an unreliable mock network is used as the testing environment. There might still have some flaws in your implementation 
-// even if you've passed one run of the tests. To ensure your implementation is correct, you shall run the tests multiple times. The great MIT 6.824 course has 
-// provided a [python script](https://blog.josejg.com/debugging-pretty/) for running multiple run of tests in parallel. It also provides a python script for prettifying 
+// (4) For this part and subsequent parts, an unreliable mock network is used as the testing environment. There might still have some flaws in your implementation
+// even if you've passed one run of the tests. To ensure your implementation is correct, you shall run the tests multiple times. The great MIT 6.824 course has
+// provided a [python script](https://blog.josejg.com/debugging-pretty/) for running multiple run of tests in parallel. It also provides a python script for prettifying
 // your log output. You may need to learn the script and adjust your logging format to make the script works correctly.
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	// check if we can propose this raft cmd.
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
 		cb.Done(ErrResp(err))
+		return
+	}
+
+	if !d.IsLeader() {
+		// I'm not the leader, but I will tell you which peer I think it's the leader.
+		BindRespError(cb.Resp, &util.ErrNotLeader{
+			RegionId: d.regionId,
+			Leader:   d.getPeerFromCache(d.LeaderId()),
+		})
+		cb.Done(cb.Resp)
+		return
+	}
+
+	// FIXME: How to check if a raft cmd is stale or not? What raft cmds are regarded as stale cmds?
+	if err = util.CheckTerm(msg, d.Term()); err != nil {
+		BindRespError(cb.Resp, &util.ErrStaleCommand{})
+		// FIXME: Shall I use NotifyStaleReq?
+		cb.Done(cb.Resp)
+		return
+	}
+
+	data, err := msg.Marshal()
+	if err != nil {
+		BindRespError(cb.Resp, errors.New("cannot marshal raft cmd"))
+		cb.Done(cb.Resp)
+		return
+	}
+
+	// record this proposal.
+	prop := &proposal{
+		// note, next proposal index = the last index of raft log + 1.
+		// if a log entry is committed at index i, all proposals with indexes <= i shall be finished already.
+		// if there're some proposals with indexes <= i not finished yet, they're regarded as stale cmds and
+		// will not be executed.
+		index: d.nextProposalIndex(),
+		term:  d.Term(),
+		cb:    cb,
+	}
+	d.proposals = append(d.proposals, prop)
+
+	// propose this raft cmd to raft raw node.
+	// note, even if this raft cmd contains multiple requests, it's also wrapped into one proposal.
+	// this is because the raft module is responsible for replicating cmds, it does not execute cmds.
+	// when the raft worker notifies this cmd is replicated successfully (i.e. committed, which will eventually be replicated on all servers),
+	// it then executes the cmd by applying each request contained in the cmd to the state machine.
+	rn := d.RaftGroup
+	err = rn.Propose(data)
+	if err != nil {
+		BindRespError(cb.Resp, errors.New("cannot propose raft cmd"))
+		cb.Done(cb.Resp)
 		return
 	}
 }
@@ -80,7 +131,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	// TODO: handle applySnapRes.
 	_, err := d.peerStorage.SaveReadyState(&rd)
 	if err != nil {
-		// fixme: shall i panic?
+		// FIXME: shall i panic?
 		panic(err)
 	}
 
@@ -90,15 +141,117 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 
 	// apply committed entries, i.e. input the log entries to the state machine, i.e. the kvdb.
+	kvdb := d.ctx.engine.Kv
 	kvWB := new(engine_util.WriteBatch)
-	// for _, ent := range rd.CommittedEntries {
+	for _, ent := range rd.CommittedEntries {
+		// unmarshal data to raft cmd.
+		m := &raft_cmdpb.RaftCmdRequest{}
+		err = proto.Unmarshal(ent.Data, m)
+		// FIXME: Shall I panic? Or just skip it?
+		if err != nil {
+			panic(err)
+		}
 
-	// }
-	err = kvWB.WriteToDB(d.ctx.engine.Kv)
+		// find the corresponding proposal of this cmd.
+		i := -1
+		for ; i < len(d.proposals); i++ {
+			p := d.proposals[i]
+			if p.index == ent.Index {
+				break
+			}
+		}
+		if i == -1 {
+			// no corresponding proposal found, do not execute this cmd since it may be duplicated.
+			continue
+		}
+		// get the corresponding proposal.
+		prop := d.proposals[i]
+
+		// notify clients all proposals with indexes < i as stale cmds.
+		for _, p := range d.proposals[:i] {
+			NotifyStaleReq(d.Term(), p.cb)
+		}
+
+		// remove stale proposals.
+		d.proposals = d.proposals[i:]
+
+		// execute this cmd.
+		// TODO: wrap the following for loop into another function.
+		cmd_resp := newCmdResp()
+		for _, req := range m.Requests {
+			// TODO: wrap the logic of handling each type of cmd into a single function.
+			switch req.CmdType {
+			case raft_cmdpb.CmdType_Get:
+				val, err := engine_util.GetCF(kvdb, req.Get.Cf, req.Get.Key)
+				// FIXME: Why the error is bind to the cmd response, not the response for one request?
+				if err != nil {
+					cmd_resp.Header.Error = util.RaftstoreErrToPbError(&util.ErrKeyNotInRegion{
+						Key:    req.Get.Key,
+						Region: d.Region(),
+					})
+					// FIXME: Shall I continue executing of one request fails?
+				}
+				get_resp := &raft_cmdpb.GetResponse{
+					Value: val,
+				}
+				resp := &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Get,
+					Get:     get_resp,
+				}
+				cmd_resp.Responses = append(cmd_resp.Responses, resp)
+
+			case raft_cmdpb.CmdType_Put:
+				// FIXME: Shall I wrap all writes into one batch or execute them one by one?
+				kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+				put_resp := &raft_cmdpb.PutResponse{}
+				resp := &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Put,
+					Put:     put_resp,
+				}
+				cmd_resp.Responses = append(cmd_resp.Responses, resp)
+
+			case raft_cmdpb.CmdType_Delete:
+				kvWB.DeleteCF(req.Delete.Cf, req.Delete.Key)
+				delete_resp := &raft_cmdpb.DeleteResponse{}
+				resp := &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Delete,
+					Delete:  delete_resp,
+				}
+				cmd_resp.Responses = append(cmd_resp.Responses, resp)
+
+			case raft_cmdpb.CmdType_Snap:
+				// TODO: execute snap cmd.
+
+				// FIXME: What does the following sentence mean?
+				// For the snap command response, should set badger Txn to callback explicitly.
+
+				snap_resp := &raft_cmdpb.SnapResponse{
+					Region: d.Region(),
+				}
+				resp := &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Snap,
+					Snap:    snap_resp,
+				}
+				cmd_resp.Responses = append(cmd_resp.Responses, resp)
+
+			default:
+				panic("unknown raft cmd type")
+			}
+		}
+
+		// notify the client that this proposal is done and forward the responses of each request to the client.
+		prop.cb.Done(cmd_resp)
+	}
+
+	// apply the batch of writes.
+	err = kvWB.WriteToDB(kvdb)
 	if err != nil {
-		// fixme: shall i panic?
+		// FIXME: Shall I panic?
 		panic(err)
 	}
+
+	// notify the raft module that all ready state are processed.
+	rn.Advance(rd)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
