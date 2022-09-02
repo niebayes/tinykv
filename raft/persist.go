@@ -14,10 +14,11 @@ func (r *Raft) restoreHardState(hardState *pb.HardState) {
 	r.Vote = hardState.Vote
 	l := r.RaftLog
 	// note, the raft init log index may not 0, and hence hardState.Commit may not be 0.
-	// so we need to update the applied index and stabled index accordingly.
+	// so we need to update the stabled index accordingly.
+	// note, we cannot update applied index according to commit index, it only gets updated 
+	// when the state machine executes a raft cmd successfully.
 	index := hardState.Commit
 	l.committed = index
-	l.applied = index
 	l.stabled = max(index, l.stabled)
 }
 

@@ -28,7 +28,7 @@ import (
 
 // handle MsgHup message
 func (r *Raft) handleMsgHup() {
-	r.logger.recvHUP()
+	r.Logger.recvHUP()
 
 	r.becomeCandidate()
 	// if the cluster only contain one node, this node immediately becomes the leader.
@@ -42,7 +42,7 @@ func (r *Raft) handleMsgHup() {
 
 // handle MsgBeat message.
 func (r *Raft) handleBeat() {
-	r.logger.recvBEAT()
+	r.Logger.recvBEAT()
 
 	r.bcastHeartbeat()
 }
@@ -59,7 +59,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Lead = lead
 	r.State = StateFollower
 
-	r.logger.stateToFollower(oldTerm)
+	r.Logger.stateToFollower(oldTerm)
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -76,13 +76,13 @@ func (r *Raft) becomeCandidate() {
 	r.resetElectionTimer()
 
 	// now it's safe to become a candidate.
-	r.logger.stateToCandidate()
+	r.Logger.stateToCandidate()
 	r.State = StateCandidate
 }
 
 // upon becoming a new candidate, broadcast RequestVote RPCs to start a new round of election.
 func (r *Raft) bcastRequestVote() {
-	r.logger.bcastRVOT()
+	r.Logger.bcastRVOT()
 
 	ids := r.idsFromPrs()
 	for _, to := range ids {
@@ -105,7 +105,7 @@ func (r *Raft) bcastRequestVote() {
 
 // handle RequestVote RPC request.
 func (r *Raft) handleRequestVote(m pb.Message) {
-	r.logger.recvRVOT(m)
+	r.Logger.recvRVOT(m)
 
 	// step down if I'm stale.
 	if m.Term > r.Term {
@@ -117,9 +117,9 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 	if !reject {
 		r.Vote = m.From
-		r.logger.voteTo(m.From)
+		r.Logger.voteTo(m.From)
 	} else {
-		r.logger.rejectVoteTo(m.From)
+		r.Logger.rejectVoteTo(m.From)
 	}
 
 	// reset election timer since I've granted the vote and this may result in spawning a new leader.
@@ -140,7 +140,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 // handle RequestVote RPC response.
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
-	r.logger.recvRVOTRes(m)
+	r.Logger.recvRVOTRes(m)
 
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, m.From)
@@ -182,7 +182,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
-	r.logger.stateToLeader()
+	r.Logger.stateToLeader()
 
 	r.resetVoteRecord()
 	r.resetPeerProgress()
@@ -197,7 +197,7 @@ func (r *Raft) becomeLeader() {
 	// are also committed.
 	noop_ent := r.makeNoopEntry()
 	r.appendEntries([]*pb.Entry{&noop_ent})
-	r.logger.appendEnts([]pb.Entry{noop_ent})
+	r.Logger.appendEnts([]pb.Entry{noop_ent})
 
 	// if there's only one node in the cluster, this noop gets immediately committed.
 	r.maybeUpdateCommitIndex()

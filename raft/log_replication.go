@@ -24,7 +24,7 @@ import (
 
 // handle MsgPropose message.
 func (r *Raft) handlePropose(m pb.Message) {
-	r.logger.recvPROP(m)
+	r.Logger.recvPROP(m)
 
 	// ignore the proposal if no entries.
 	if len(m.Entries) == 0 {
@@ -38,7 +38,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 		m.Entries[i].Term = r.Term
 	}
 	r.appendEntries(m.Entries)
-	r.logger.appendEnts(entsClone(m.Entries))
+	r.Logger.appendEnts(entsClone(m.Entries))
 
 	// followers will drop MsgProp. (Possibly they will redirect it to the leader)
 	// candidates only append entries.
@@ -59,7 +59,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 // if must is true, the RPC is always sent and if there's no new entries, the latest snapshot is sent.
 // if there's no available snapshot right, panic.
 func (r *Raft) bcastAppendEntries(must bool) {
-	r.logger.bcastAENT()
+	r.Logger.bcastAENT()
 
 	// note, the order of iterating map in Go is not determined.
 	// someone says raft would be more stable if the bcast order is determined.
@@ -73,7 +73,7 @@ func (r *Raft) bcastAppendEntries(must bool) {
 
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
-	r.logger.recvAENT(m)
+	r.Logger.recvAENT(m)
 
 	// drop stale msgs.
 	if m.Term < r.Term {
@@ -91,8 +91,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	l := r.RaftLog
 
 	// log consistency check: log has an entry at index prevLogIndex and with the same term.
-	// log consistency check only functions when prevLogIndex > 0.
-	if prevLogIndex > 0 {
+	if prevLogIndex > l.lastIncludedIndex {
 		ent, err := l.Entry(prevLogIndex)
 		if err != nil {
 			// my log does not have a entry at the index prevLogIndex, and hence index conflicts.
@@ -111,7 +110,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 				NextIndex: l.LastIndex() + 1,
 			})
 
-			r.logger.rejectEnts(pb.RejectReason_IndexConflict, m.From)
+			r.Logger.rejectEnts(pb.RejectReason_IndexConflict, m.From)
 			return
 
 		} else if ent.Term != prevLogTerm {
@@ -143,12 +142,12 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 				ConflictTerm: conflictTerm,
 			})
 
-			r.logger.rejectEnts(pb.RejectReason_TermConflict, m.From)
+			r.Logger.rejectEnts(pb.RejectReason_TermConflict, m.From)
 			return
 		}
 	}
 
-	r.logger.acceptEnts(m.From)
+	r.Logger.acceptEnts(m.From)
 
 	// the new entries are not rejected if passed the log consistency check.
 	// but some of them may be stale, some of them may have conflict,
@@ -175,7 +174,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 // handle AppendEntries RPC response.
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
-	r.logger.recvAENTRes(m)
+	r.Logger.recvAENTRes(m)
 
 	// drop stale msgs.
 	if m.Term < r.Term {
@@ -242,7 +241,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	l := r.RaftLog
 	pr.Next = min(pr.Next, l.LastIndex()+1)
 
-	r.logger.updateProgOf(m.From, oldNext, oldMatch, pr.Next, pr.Match)
+	r.Logger.updateProgOf(m.From, oldNext, oldMatch, pr.Next, pr.Match)
 
 	// if the next index is reduced, it means some conflicts occur and I immediately
 	// retry to let the follower quickly keep in sync with me.
@@ -259,7 +258,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 
 // broadcast Heartbeat RPC to all other peers in the cluster.
 func (r *Raft) bcastHeartbeat() {
-	r.logger.bcastHBET()
+	r.Logger.bcastHBET()
 
 	ids := r.idsFromPrs()
 	for _, to := range ids {
@@ -289,7 +288,7 @@ func (r *Raft) bcastHeartbeat() {
 
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
-	r.logger.recvHBET(m)
+	r.Logger.recvHBET(m)
 
 	// drop stale msgs.
 	if m.Term < r.Term {
@@ -418,7 +417,7 @@ func (r *Raft) appendNewEntries(prevLogIndex uint64, nents []*pb.Entry) uint64 {
 			if ent != nil {
 				// discard conflict entry and all follow it.
 				offset := l.idx2off(ent.Index)
-				r.logger.discardEnts(l.entries[offset:])
+				r.Logger.discardEnts(l.entries[offset:])
 				l.entries = l.entries[:offset]
 				// some stable entries may be discarded, so update stable index.
 				l.stabled = min(l.stabled, l.LastIndex())
@@ -428,7 +427,7 @@ func (r *Raft) appendNewEntries(prevLogIndex uint64, nents []*pb.Entry) uint64 {
 			nents_clone := entsClone(nents[i:])
 			l.entries = append(l.entries, nents_clone...)
 
-			r.logger.appendEnts(nents_clone)
+			r.Logger.appendEnts(nents_clone)
 
 			return lastNewEntryIndex
 		}
@@ -459,7 +458,7 @@ func (r *Raft) maybeUpdateCommitIndex() bool {
 		if r.checkQuorumAppend(index) {
 			oldCommitted := l.committed
 			l.committed = index
-			r.logger.updateCommitted(oldCommitted)
+			r.Logger.updateCommitted(oldCommitted)
 			return true
 		}
 	}
@@ -470,8 +469,8 @@ func (r *Raft) sendAppendEntries(to uint64, must bool) {
 	l := r.RaftLog
 	pr := r.Prs[to]
 
-	prevLogIndex := uint64(0)
-	prevLogTerm := uint64(0)
+	prevLogIndex := l.lastIncludedIndex
+	prevLogTerm := l.lastIncludedTerm
 	prevLog, err := l.Entry(pr.Next - 1)
 	if err == nil {
 		prevLogIndex = prevLog.Index
@@ -497,7 +496,7 @@ func (r *Raft) sendAppendEntries(to uint64, must bool) {
 	}
 	r.forwardMsgUp(m)
 
-	r.logger.sendEnts(prevLogIndex, prevLogTerm, ents, to)
+	r.Logger.sendEnts(prevLogIndex, prevLogTerm, ents, to)
 }
 
 // only used in test cases.
@@ -520,7 +519,7 @@ func (r *Raft) updateLeaderProg() {
 	// max is applied to follow the convention that match index never reduces.
 	pr.Match = max(pr.Match, pr.Next-1)
 
-	r.logger.updateProgOf(r.id, oldNext, oldMatch, pr.Next, pr.Match)
+	r.Logger.updateProgOf(r.id, oldNext, oldMatch, pr.Next, pr.Match)
 }
 
 func (r *Raft) tryUpdateCommitted(committed, lastNewEntryIndex uint64) {
@@ -538,7 +537,7 @@ func (r *Raft) tryUpdateCommitted(committed, lastNewEntryIndex uint64) {
 	}
 
 	if l.committed != oldCommitted {
-		r.logger.updateCommitted(oldCommitted)
+		r.Logger.updateCommitted(oldCommitted)
 	}
 }
 
@@ -550,7 +549,7 @@ func (r *Raft) tryUpdateApplied(applied uint64) {
 	// applied index never decreases.
 	oldApplied := l.applied
 	l.applied = applied
-	r.logger.updateApplied(oldApplied)
+	r.Logger.updateApplied(oldApplied)
 }
 
 func (r *Raft) tryUpdateStabled(stabled uint64) {
@@ -558,5 +557,5 @@ func (r *Raft) tryUpdateStabled(stabled uint64) {
 	// FIXME: Can stabled index decrease?
 	oldStabled := l.stabled
 	l.stabled = stabled
-	r.logger.updateStabled(oldStabled)
+	r.Logger.updateStabled(oldStabled)
 }

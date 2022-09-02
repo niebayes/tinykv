@@ -118,7 +118,7 @@ type Raft struct {
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
 
-	logger *Logger
+	Logger *Logger
 }
 
 // newRaft return a raft peer with the given config
@@ -147,10 +147,11 @@ func newRaft(c *Config) *Raft {
 	}
 
 	// init logger.
-	r.logger = makeLogger(true, "raft.log")
-	r.logger.r = r
+	r.Logger = makeLogger(true, "raft.log")
+	r.Logger.r = r
 
-	// init peer progress.
+	// init peer progress. (only for testing).
+	// TODO: add a hint for how to init peer progress in project2b.
 	for _, id := range c.peers {
 		r.Prs[id] = &Progress{}
 	}
@@ -159,8 +160,8 @@ func newRaft(c *Config) *Raft {
 	// check if there're some restored stable entries.
 	l := r.RaftLog
 	if l.stabled != 0 {
-		r.logger.restoreEnts(l.allEntries())
-		r.logger.updateStabled(0)
+		r.Logger.restoreEnts(l.allEntries())
+		r.Logger.updateStabled(0)
 	}
 
 	// restore persisted states.
@@ -172,7 +173,7 @@ func newRaft(c *Config) *Raft {
 
 	r.resetElectionTimer()
 
-	r.logger.startRaft()
+	r.Logger.startRaft()
 
 	return r
 }
@@ -206,7 +207,7 @@ func (r *Raft) tick() {
 func (r *Raft) tickElection() {
 	r.electionElapsed++
 	if r.electionElapsed >= r.electionTimeout {
-		r.logger.elecTimeout()
+		r.Logger.elecTimeout()
 		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgHup,
 			From:    r.id,
@@ -220,7 +221,7 @@ func (r *Raft) tickElection() {
 func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
-		r.logger.beatTimeout()
+		r.Logger.beatTimeout()
 		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgBeat,
 			From:    r.id,

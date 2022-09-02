@@ -84,6 +84,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if err != nil {
 		BindRespError(cb.Resp, errors.New("cannot marshal raft cmd"))
 		cb.Done(cb.Resp)
+		panic(err)
 		return
 	}
 
@@ -109,6 +110,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if err != nil {
 		BindRespError(cb.Resp, errors.New("cannot propose raft cmd"))
 		cb.Done(cb.Resp)
+		panic(err)
 		return
 	}
 }
@@ -132,6 +134,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	_, err := d.peerStorage.SaveReadyState(&rd)
 	if err != nil {
 		log.Fatalf(err.Error())
+		panic(err)
 	}
 
 	// send pending raft msgs to other peers.
@@ -148,7 +151,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		}
 
 		// each raft log entry corresponds to one raft cmd which may contain multiple requests.
-		d.process(ent, kvWB)
+		d.process(ent)
 
 		// update apply state.
 		applyState.AppliedIndex = ent.Index
@@ -158,7 +161,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 
 	// apply the batch of writes.
-	// FIXME: delay the batch of writes at here or process them one by one eargerly?
 	err = kvWB.WriteToDB(d.ctx.engine.Kv)
 	if err != nil {
 		panic(err)
@@ -169,7 +171,12 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 // process a log entry.
-func (d *peerMsgHandler) process(ent eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) process(ent eraftpb.Entry) {
+	// skip no-op entry.
+	if len(ent.Data) == 0 {
+		return
+	}
+
 	cmd := &raft_cmdpb.RaftCmdRequest{}
 	err := proto.Unmarshal(ent.Data, cmd)
 	if err != nil {
@@ -178,29 +185,50 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry, kvWB *engine_util.WriteBatch
 	}
 
 	// find the corresponding proposal of this log entry.
-	newi := 0 // the start index of the proposals array after processing.
+	stale_index := 0 // the start index of the proposals array after processing.
 	for i := 0; i < len(d.proposals); i++ {
 		p := d.proposals[i]
-		if p.index < ent.Index {
+		if p.index < ent.Index || p.term < ent.Term {
 			NotifyStaleReq(d.Term(), p.cb)
-			newi = i
+			stale_index = i
 
-		} else if p.index == ent.Index {
-			cmd_resp := newCmdResp()
+		} else if p.index == ent.Index && p.term == ent.Term {
+			// each raft cmd corresponds to one batch of writes.
 			kvWB := new(engine_util.WriteBatch)
+			cmd_resp := newCmdResp()
+
 			for _, request := range cmd.Requests {
-				d.handleRequest(request, cmd_resp, kvWB)
+				d.handleRequest(request, cmd_resp, kvWB, p)
 			}
-			p.cb.Done(cmd_resp)
-			newi = i
+
+			if kvWB.Len() > 0 {
+				err = kvWB.WriteToDB(d.ctx.engine.Kv)
+				if err != nil {
+					panic(err)
+				}
+			}
+
+			// only the leader is responsible for notifying the client.
+			if d.IsLeader() {
+				d.RaftGroup.Raft.Logger.ProcessedProp(p.index)
+				p.cb.Done(cmd_resp)
+			}
+			// this cmd was processed and hence it's also marked staled.
+			stale_index = i
 			break
 		}
 	}
 
-	d.proposals = d.proposals[newi:]
+	// the start index of the remaining proposals after discarding stale and processed proposals.
+	newi := stale_index + 1
+	if newi >= len(d.proposals) {
+		d.proposals = d.proposals[:0]
+	} else {
+		d.proposals = d.proposals[newi+1:]
+	}
 }
 
-func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch, p *proposal) {
 	switch request.CmdType {
 	case raft_cmdpb.CmdType_Get:
 		resp := d.handleGetRequest(request)
@@ -208,6 +236,7 @@ func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *ra
 			CmdType: raft_cmdpb.CmdType_Get,
 			Get:     resp,
 		})
+		log.Infof("N%v processed Get request: key %v \n", d.PeerId(), string(request.Get.Key))
 
 	case raft_cmdpb.CmdType_Put:
 		resp := d.handlePutRequest(request, kvWB)
@@ -215,6 +244,7 @@ func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *ra
 			CmdType: raft_cmdpb.CmdType_Put,
 			Put:     resp,
 		})
+		log.Infof("N%v processed Put request: key: %v val: %v \n", d.PeerId(), string(request.Put.Key), string(request.Put.Value))
 
 	case raft_cmdpb.CmdType_Delete:
 		resp := d.handleDeleteRequest(request, kvWB)
@@ -222,13 +252,15 @@ func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *ra
 			CmdType: raft_cmdpb.CmdType_Delete,
 			Delete:  resp,
 		})
+		log.Infof("N%v processed Delete request: key %v \n", d.PeerId(), string(request.Delete.Key))
 
 	case raft_cmdpb.CmdType_Snap:
-		resp := d.handleSnapRequest(request)
+		resp := d.handleSnapRequest(request, p)
 		cmd_resp.Responses = append(cmd_resp.Responses, &raft_cmdpb.Response{
 			CmdType: raft_cmdpb.CmdType_Snap,
 			Snap:    resp,
 		})
+		log.Infof("N%v processed Snap request \n", d.PeerId())
 
 	default:
 		panic("unknown cmd type")
@@ -256,11 +288,15 @@ func (d *peerMsgHandler) handleDeleteRequest(request *raft_cmdpb.Request, kvWB *
 	return response
 }
 
-func (d *peerMsgHandler) handleSnapRequest(request *raft_cmdpb.Request) *raft_cmdpb.SnapResponse {
+func (d *peerMsgHandler) handleSnapRequest(request *raft_cmdpb.Request, p *proposal) *raft_cmdpb.SnapResponse {
 	// TODO: handle snapshot request.
 	response := &raft_cmdpb.SnapResponse{
 		Region: d.Region(),
 	}
+	// TODO: wrap these to a hint.
+	// when a client wishes to read the kv, the storage returns it a snapshot which is wrapped into
+	// a txn. So, we start a new txn here, and let the service handler discards the txn.
+	p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
 	return response
 }
 

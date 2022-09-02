@@ -927,9 +927,6 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	// since it's no-op, the upper application does not need to execute it, so applied = committed.
 	r.RaftLog.applied = r.RaftLog.committed
 	r.RaftLog.stabled = r.RaftLog.LastIndex()
-
-	r.logger.updateApplied(0)
-	r.logger.updateStabled(0)
 }
 
 // accept and append all entries conveyed in the message.

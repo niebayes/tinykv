@@ -193,8 +193,7 @@ func (rn *RawNode) Advance(rd Ready) {
 	if len(rd.Entries) > 0 {
 		rn.Raft.tryUpdateStabled(rd.Entries[len(rd.Entries)-1].Index)
 	}
-	// FIXME: How to check if there's a snapshot?
-	if rd.Snapshot.Data != nil {
+	if !IsEmptySnap(&rd.Snapshot) {
 		l.lastIncludedIndex = rd.Snapshot.Metadata.Index
 		l.lastIncludedTerm = rd.Snapshot.Metadata.Term
 	}

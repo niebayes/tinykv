@@ -10,7 +10,7 @@ import (
 )
 
 // true to turn on debugging/logging.
-const debug = true
+const debug = false
 const LOGTOFILE = false
 
 // what topic the log message is related to.
@@ -18,16 +18,36 @@ const LOGTOFILE = false
 type logTopic string
 
 const (
-	dElect     logTopic = "ELEC" // leader election events: election timeout, start new election, step down, become leader.
-	dVote      logTopic = "VOTE" // voting events: request, grant, deny votes.
-	dClient    logTopic = "CLNT" // client interaction events: start server, receive client's agreement request, apply new ApplyMsg to client.
+	// leader election events:
+	//   receive MsgHup
+	//   election timeout
+	//   become candidate
+	//   broadcast RequestVote
+	//   grant vote
+	//   deny vote
+	//   become follower
+	//   become leader
+	dElect logTopic = "ELEC"
+
+	// log replication events:
 	dReplicate logTopic = "LRPE" // log replication events: leader append new logs, leader detect new logs, leader sends new logs, log consistency check, follower handle conflicts, follower appends new logs, leader updates next index.
-	dCommit    logTopic = "CMIT" // log commit events: leader commits, follower commits.
-	dMsg       logTopic = "MESG" // RPC communication events: send RPC, receive RPC request, receive RPC response.
-	dReject    logTopic = "REJC" // reject RPC events: term changes, state changes.
-	dTimer     logTopic = "TIMR" // reset timer events: receive AppendEntries from current leader, start new election, grant vote.
-	dPersist   logTopic = "PERS" // persistence events: backup, restore.
-	dSnap      logTopic = "SNAP" // snapshotting events: service sends a snapshot, server snapshots, leader detects a follower is lagging hebind, leader sends InstallSnapshot to lagged follower, follower forwards snapshot to service, service conditionally installs a snapshot by asking Raft.
+
+	// peer handling events:
+	//   propose new raft cmd
+	//   persist unstable log entries
+	//   process committed log entry/raft cmd
+	//   input to state machine
+	//   advance applied index
+	dPeer logTopic = "CLNT" // client interaction events: start server, receive client's agreement request, apply new ApplyMsg to client.
+
+	// persistence events:
+	dPersist logTopic = "PERS" // persistence events: backup, restore.
+
+	// snapshot events:
+	dSnap logTopic = "SNAP" // snapshotting events: service sends a snapshot, server snapshots, leader detects a follower is lagging hebind, leader sends InstallSnapshot to lagged follower, follower forwards snapshot to service, service conditionally installs a snapshot by asking Raft.
+
+	// drop messages events:
+	dDrop    logTopic = "REJC" // reject RPC events: term changes, state changes.
 )
 
 type Logger struct {
@@ -72,7 +92,7 @@ func (logger *Logger) printf(topic logTopic, format string, a ...interface{}) {
 		// time := time.Since(logger.startTime).Milliseconds()
 		time := time.Since(logger.startTime).Microseconds()
 		// e.g. 008256 VOTE ...
-		prefix := fmt.Sprintf("%09d %v ", time, string(topic))
+		prefix := fmt.Sprintf("%010d %v ", time, string(topic))
 		format = prefix + format
 		log.Printf(format, a...)
 	}
@@ -293,4 +313,13 @@ func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 	for _, ent := range ents {
 		l.printf(topic, "N%v    (I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
 	}
+}
+
+//
+// process requests events.
+//
+
+func (l *Logger) ProcessedProp(propIndex uint64) {
+	r := l.r
+	l.printf(dPeer, "N%v PROCESSED PROP %v", r.id, propIndex)
 }

@@ -197,13 +197,20 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
+		// spawn a set of clients which sending raft cmds to leader. 
+		// wait until all sending tasks are done.
 		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
+			// record how many times of MustPut was called before termination.
 			j := 0
 			defer func() {
 				clnts[cli] <- j
 			}()
+			// call MustPut and Scan interchangably, and check if this Scan corresponds 
+			// to the result of the last MustPut.
 			last := ""
+			// loop until done_clients is set to non-zero.
 			for atomic.LoadInt32(&done_clients) == 0 {
+				// make the odds to call MustPut and Scan even.
 				if (rand.Int() % 1000) < 500 {
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
@@ -250,7 +257,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			time.Sleep(electionTimeout)
 		}
 
-		// log.Printf("wait for clients\n")
+		// log.Infof("wait for clients\n")
 		<-ch_clients
 
 		if crash {
@@ -269,18 +276,21 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 
 		for cli := 0; cli < nclients; cli++ {
-			// log.Printf("read from clients %d\n", cli)
+			// log.Infof("read from clients %d\n", cli)
 			j := <-clnts[cli]
 
 			// if j < 10 {
-			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
+			// 	log.Infof("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
 			// }
+
+			// check if all MustPut succeeded.
 			start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 			end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 			values := cluster.Scan([]byte(start), []byte(end))
 			v := string(bytes.Join(values, []byte("")))
 			checkClntAppends(t, cli, v, j)
 
+			// delete the items put by MustPut
 			for k := 0; k < j; k++ {
 				key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", k)
 				cluster.MustDelete([]byte(key))
