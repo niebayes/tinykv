@@ -15,6 +15,9 @@
 package raft
 
 import (
+	"errors"
+	"log"
+
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -23,6 +26,9 @@ import (
 //  snapshot/first.....applied....committed....stabled.....last
 //  --------|------------------------------------------------|
 //                            log entries
+// snapshot is indicated by the lastIncludedIndex.
+// generally, lastIncludedIndex + 1 = storage.FirstIndex
+// the first and last are storage.FirstIndex and storage.LastIndex, respectively.
 //
 // for simplicity the RaftLog implementation should manage all log entries
 // that not truncated, i.e. not snapshoted.
@@ -36,15 +42,15 @@ import (
 // note, stable != commited. Even if log entries are persisted, they may not be committed yet
 // and even may be discarded.
 
-import (
-	"errors"
-)
-
 var ErrIndexOutOfRange error = errors.New("index out of range")
 var ErrDiscardCommitted error = errors.New("discarding committed entries")
 
 type RaftLog struct {
 	// storage contains all stable entries since the last snapshot.
+	// i.e. truncated log entries are not contained in the stable storage.
+	// and we have:
+	// lastIncludedIndex = storage.FirstIndex + 1, if storage is not empty.
+	// stabled index = storage.LastIndex
 	storage Storage
 
 	// committed is the highest log position that is known to be in
@@ -77,32 +83,38 @@ type RaftLog struct {
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
-	raft_log := &RaftLog{
+	l := &RaftLog{
 		storage:           storage,
-		committed:         0,
-		applied:           0,
 		lastIncludedIndex: 0,
 		lastIncludedTerm:  0,
+		applied:           0,
+		committed:         0,
+		stabled:           0,
 		// append a dummy entry while init to simplify log indexing.
 		entries:         make([]pb.Entry, 1),
 		pendingSnapshot: &pb.Snapshot{},
 	}
 
-	// upon init, read all persisted stable logs into the log.
-	fi, err := storage.FirstIndex()
+	fi, _ := storage.FirstIndex()
 	li, _ := storage.LastIndex()
-	// err != nil => there's at least one entry excluding the dummy entry in the storage.
-	if err == nil {
-		stable_ents, _ := storage.Entries(fi, li+1)
-		raft_log.entries = append(raft_log.entries, stable_ents...)
+
+	// retrieve truncated state.
+	l.lastIncludedIndex = fi - 1
+	l.lastIncludedTerm, _ = storage.Term(fi - 1)
+
+	// restore stable entries from storage.
+	// note, Entries takes a range [lo, hi) with left closed and right open.
+	stable_ents, err := storage.Entries(fi, li+1)
+	if err == nil && len(stable_ents) > 0 {
+		l.entries = append(l.entries, stable_ents...)
 	}
 
 	// update stabled index since we may have restored some persisted entries from stable storage.
 	// note, commit index cannot be updated right now. Commit index is only updated when the leader
 	// notifies us that a quorum of nodes in the cluster has replicated these entries.
-	raft_log.stabled = raft_log.LastIndex()
+	l.stabled = l.LastIndex()
 
-	return raft_log
+	return l
 }
 
 // return all entries not compacted yet, excluding the dummy entry.
@@ -112,7 +124,12 @@ func (l *RaftLog) allEntries() []pb.Entry {
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
-	offset := l.idx2off(l.stabled + 1)
+	index := l.stabled + 1
+	if !l.isValidIndex(index) {
+		// the creepy test requires us to return a empty slice, instead of nil.
+		return make([]pb.Entry, 0)
+	}
+	offset := l.idx2off(index)
 	return l.entries[offset:]
 }
 
@@ -164,8 +181,8 @@ func (l *RaftLog) LastIndex() uint64 {
 
 // transform log index to offset in the entries array.
 func (l *RaftLog) idx2off(index uint64) uint64 {
-	if index < 1 {
-		panic(ErrIndexOutOfRange)
+	if !l.isValidIndex(index) {
+		log.Fatalf(ErrIndexOutOfRange.Error())
 	}
 	// note, there's a dummy entry at the head of entries.
 	offset := index - l.lastIncludedIndex
@@ -179,7 +196,7 @@ func (l *RaftLog) Len() uint64 {
 
 // return (entry, nil) where the entry is the entry at index index if the entry exists. Otherwise, return (nil, error)
 func (l *RaftLog) Entry(i uint64) (*pb.Entry, error) {
-	if i <= l.lastIncludedIndex || i > l.LastIndex() {
+	if !l.isValidIndex(i) {
 		return nil, ErrIndexOutOfRange
 	}
 	offset := l.idx2off(i)
@@ -209,4 +226,8 @@ func (l *RaftLog) maybeCompact() {
 
 func (l *RaftLog) hasPendingSnapshot() bool {
 	return l.pendingSnapshot != nil && len(l.pendingSnapshot.Data) > 0
+}
+
+func (l *RaftLog) isValidIndex(i uint64) bool {
+	return l.lastIncludedIndex < i && i <= l.LastIndex()
 }

@@ -152,6 +152,8 @@ func (rn *RawNode) Ready() Ready {
 	rd.Entries = l.unstableEntries()
 	rd.CommittedEntries = l.nextEnts()
 	rd.Messages = rn.Raft.msgs
+	// be sure to empty the mailbox after retrieving.
+	rn.Raft.msgs = rn.Raft.msgs[:0]
 	// to fit into the creepy tests.
 	if len(rd.Messages) == 0 {
 		rd.Messages = nil
@@ -166,11 +168,13 @@ func (rn *RawNode) Ready() Ready {
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
-// i.e. if there're entries to be stabled, if there're entries to be applied,
-// or if there're snapshot to be installed.
+// (1) if there're msgs to be sent.
+// (2) if there're newly appended entries to be stabled.
+// (3) if there're newly committed entries to be applied,
+// (4) if there're pending snapshot to be installed.
 func (rn *RawNode) HasReady() bool {
 	l := rn.Raft.RaftLog
-	return len(l.unstableEntries()) > 0 || len(l.nextEnts()) > 0 || l.hasPendingSnapshot()
+	return len(rn.Raft.msgs) > 0 || len(l.unstableEntries()) > 0 || len(l.nextEnts()) > 0 || l.hasPendingSnapshot()
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the

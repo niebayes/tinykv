@@ -220,6 +220,8 @@ func (ps *PeerStorage) checkRange(low, high uint64) error {
 }
 
 func (ps *PeerStorage) truncatedIndex() uint64 {
+	// upon init, TruncatedState.Index is set to RaftInitLogIndex.
+	// TruncatedState.Index = lastIncludedIndex.
 	return ps.applyState.TruncatedState.Index
 }
 
@@ -309,11 +311,8 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 //
 // Note, all entries with indexes <= stabled are stored in storage (excluding truncated entries).
-// However, some entries with indexes in the range (committed, stabled] may be discarded
-// since they may not get committed in the final.
-// The entries passed into Append must be entries with indexes >= committed, but they may conflict with
-// the existing stable, but not committed entries.
-// So, in Append, you should delete these conflicting entries and then append.
+// However, some entries may be discarded since they may not get committed in the final.
+// These entries may conflict with entries passed into Append, and hence need to be discarded.
 // Techniquely, any entries in the storage with indexes >= first index of new entries shall be deleted.
 // But the underlying storage engine Badger db is not an append-only database, it supports Put operation.
 // Therefore, you can put new entries and then delete the remaining conflicting entries (if any) which are the entries
@@ -321,11 +320,6 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	if len(entries) == 0 {
 		return nil
-	}
-
-	firstNewEntryIndex := entries[0].Index
-	if firstNewEntryIndex <= ps.raftState.HardState.Commit {
-		return errors.New("entries must be uncommitted entries")
 	}
 
 	// each append is interpreted as a Put operation in the batch of write.
@@ -373,26 +367,33 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// persist unstable entries and update RaftLocalState.
 	raftWB := new(engine_util.WriteBatch)
-	err := ps.Append(ready.Entries, raftWB)
-	if err != nil {
-		return nil, err
+	if len(ready.Entries) > 0 {
+		err := ps.Append(ready.Entries, raftWB)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// update HardState (term, vote, commit) in RaftLocalState.
-	ps.raftState.HardState = &ready.HardState
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
 
 	// apply the new snapshot.
 	kvWB := new(engine_util.WriteBatch)
-	applySnapResult, err := ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
-	if err != nil {
-		return applySnapResult, err
+	var applySnapResult *ApplySnapResult = nil
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		applySnapResult, err := ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		if err != nil {
+			return applySnapResult, err
+		}
 	}
 
 	// persist the new RaftLocalState.
 	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
 
 	// apply the batch of writes.
-	err = raftWB.WriteToDB(ps.Engines.Raft)
+	err := raftWB.WriteToDB(ps.Engines.Raft)
 	if err != nil {
 		return nil, err
 	}

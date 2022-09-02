@@ -452,7 +452,8 @@ func (r *Raft) maybeUpdateCommitIndex() bool {
 	l := r.RaftLog
 	for index := l.LastIndex(); index > l.committed; index-- {
 		// only commit entries at the current term.
-		if l.entries[index].Term != r.Term {
+		ent, err := l.Entry(index)
+		if err != nil || ent.Term != r.Term {
 			continue
 		}
 		if r.checkQuorumAppend(index) {

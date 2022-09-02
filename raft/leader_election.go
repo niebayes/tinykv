@@ -19,8 +19,11 @@
 package raft
 
 import (
-	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	// "fmt"
 	"math/rand"
+
+	// "github.com/pingcap-incubator/tinykv/log"
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
 // handle MsgHup message
@@ -198,7 +201,7 @@ func (r *Raft) becomeLeader() {
 
 	// if there's only one node in the cluster, this noop gets immediately committed.
 	r.maybeUpdateCommitIndex()
-	
+
 	r.updateLeaderProg()
 }
 
@@ -214,7 +217,7 @@ func (r *Raft) resetVoteRecord() {
 func (r *Raft) resetElectionTimer() {
 	r.electionElapsed = 0
 	// raft introduces randomization into election timer to resolve split vote faster.
-	r.electionTimeout = r.electionTimeoutBase + (rand.Int() % r.electionTimeoutBase)
+	r.electionTimeout = r.electionTimeoutBase + rand.Intn(r.electionTimeoutBase)
 }
 
 func (r *Raft) checkVoteRestriction(m pb.Message) bool {

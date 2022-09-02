@@ -291,6 +291,6 @@ func (l *Logger) restoreEnts(ents []pb.Entry) {
 
 func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 	for _, ent := range ents {
-		l.printf(topic, "N%v\t(I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
+		l.printf(topic, "N%v    (I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
 	}
 }

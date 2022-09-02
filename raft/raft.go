@@ -58,7 +58,7 @@ type Progress struct {
 }
 
 type Raft struct {
-	id    uint64
+	id uint64
 
 	Term uint64
 	Vote uint64
@@ -137,9 +137,11 @@ func newRaft(c *Config) *Raft {
 		votes:               make(map[uint64]bool),
 		msgs:                make([]pb.Message, 0),
 		Lead:                None,
+		// hint: adjust election time out to make the leader election faster and stable.
 		heartbeatTimeout:    c.HeartbeatTick,
-		electionTimeout:     c.ElectionTick,
 		electionTimeoutBase: c.ElectionTick,
+		// heartbeatTimeout:    2 * c.HeartbeatTick,
+		// electionTimeoutBase: 2 * c.ElectionTick,
 		heartbeatElapsed:    0,
 		electionElapsed:     0,
 	}
@@ -162,11 +164,13 @@ func newRaft(c *Config) *Raft {
 	}
 
 	// restore persisted states.
-	hardstate, _, _ := c.Storage.InitialState()
-	r.Vote = hardstate.Vote
-	r.Term = hardstate.Term
-	l.committed = hardstate.Commit
+	hardstate, confState, _ := c.Storage.InitialState()
+	r.restoreHardState(&hardstate)
+	r.restoreConfState(&confState)
+
 	// TODO: restore persisted log from snapshot.
+
+	r.resetElectionTimer()
 
 	r.logger.startRaft()
 
@@ -229,14 +233,14 @@ func (r *Raft) tickHeartbeat() {
 // Step is the entrance of message handling including local messages and network messages.
 //
 
-func (r *Raft) Step(msg pb.Message) error {
+func (r *Raft) Step(m pb.Message) error {
 	switch r.State {
 	case StateFollower:
-		r.stepFollower(msg)
+		r.stepFollower(m)
 	case StateCandidate:
-		r.stepCandidate(msg)
+		r.stepCandidate(m)
 	case StateLeader:
-		r.stepLeader(msg)
+		r.stepLeader(m)
 	default:
 		panic("invalid state")
 	}
