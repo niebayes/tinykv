@@ -364,7 +364,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 // apply the new snapshot (if any).
 // this function shall be called in peer_msg_handler.HandleRaftReady to persist ready state.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
-func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
+func (ps *PeerStorage) SaveReadyState(ready *raft.Ready, r *raft.Raft) (*ApplySnapResult, error) {
 	// persist unstable entries and update RaftLocalState.
 	raftWB := new(engine_util.WriteBatch)
 	if len(ready.Entries) > 0 {
@@ -373,6 +373,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			return nil, err
 		}
 	}
+
 
 	// update HardState (term, vote, commit) in RaftLocalState.
 	if !raft.IsEmptyHardState(ready.HardState) {
@@ -387,6 +388,9 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if err != nil {
 		return nil, err
 	}
+
+	r.Logger.PersistEnts(ps.raftState.LastIndex)
+	r.Logger.UpdateHardState(ready.HardState)
 
 	// apply the new snapshot.
 	kvWB := new(engine_util.WriteBatch)

@@ -169,6 +169,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 
 	// a majority of nodes in the cluster support me, I become the new leader.
 	if 2*num_supports > len(r.Prs) {
+		r.Logger.recvVoteQuorum(uint64(num_supports))
 		r.becomeLeader()
 		r.bcastAppendEntries(true)
 		return
@@ -176,6 +177,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 
 	// a majority of nodes in the cluster reject me, I step down.
 	if 2*num_denials > len(r.Prs) {
+		r.Logger.recvDenyQuorum(uint64(num_denials))
 		r.becomeFollower(r.Term, m.From)
 	}
 }
@@ -243,6 +245,7 @@ func (r *Raft) resetPeerProgress() {
 	l := r.RaftLog
 	for _, pr := range r.Prs {
 		pr.Next = l.LastIndex() + 1
+		// FIXME: Shall I adjust Match to raft init log index?
 		pr.Match = 0
 	}
 }

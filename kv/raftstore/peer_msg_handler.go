@@ -97,7 +97,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	d.proposals = append(d.proposals, prop)
 
-	d.RaftGroup.Raft.Logger.NewProposal(msg)
+	d.RaftGroup.Raft.Logger.NewProposal(msg, prop.index, prop.term)
 
 	// propose this raft cmd to raft raw node.
 	// note, even if this raft cmd contains multiple requests, it's also wrapped into one proposal.
@@ -126,7 +126,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	// persist ready states.
 	// TODO: handle applySnapResult.
-	_, err := d.peerStorage.SaveReadyState(&rd)
+	_, err := d.peerStorage.SaveReadyState(&rd, rn.Raft)
 	if err != nil {
 		panic(err)
 	}
@@ -171,6 +171,7 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 			// only leader is responsible for notifying the clients.
 			if d.IsLeader() {
 				NotifyStaleReq(d.Term(), p.cb)
+				d.RaftGroup.Raft.Logger.NotifyStaleProp(p.index, p.term, ent.Index, ent.Term)
 			}
 			stale_index = i
 
@@ -191,9 +192,6 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 			applyState := d.peerStorage.applyState
 			oldAppliedIndex := applyState.AppliedIndex
 			applyState.AppliedIndex = max(applyState.AppliedIndex, ent.Index)
-
-			d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
-
 			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
 
 			// FIXME: Is is checking reasonable?
@@ -206,6 +204,8 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 			if err != nil {
 				panic(err)
 			}
+
+			d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
 
 			// notify the client if this entry is not a no-op entry,
 			// since it's a client cannot issue a no-op entry.
@@ -221,12 +221,15 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 	}
 
 	// the start index of the remaining proposals after discarding stale and processed proposals.
+	// oldProposals := make([]*proposal, 0)
+	// copy(oldProposals, d.proposals)
 	newi := stale_index + 1
 	if newi >= len(d.proposals) {
 		d.proposals = d.proposals[:0]
 	} else {
 		d.proposals = d.proposals[newi+1:]
 	}
+	// d.RaftGroup.Raft.Logger.UpdateProposals(oldProposals, d.proposals)
 }
 
 func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch, p *proposal) {

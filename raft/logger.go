@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	// "github.com/pingcap-incubator/tinykv/kv/raftstore/peer"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
@@ -38,14 +39,14 @@ const (
 
 	// the typical route of log replication is:
 	//	receive MsgProp
-	//		peer proposes a set of log entries to be replicated
 	//		append these log entries
+	//		update leader's own progress
 	//	bcastAppendEntries
 	//		other peers: handleAppendEntries
 	//			reject the whole entries due to index conflict or term conflict
 	//			accept the whole entries but discard conflicting entries and only append missing entries.
 	//	handleAppendEntriesResponse
-	//		leader update follower's progress: next index and match index 
+	//		leader update follower's progress: next index and match index
 	//		leader knows which entries are committed
 	//	bcastHeartbeat
 	//		other peers know which entries are committed
@@ -56,18 +57,28 @@ const (
 	//
 	LRPE logTopic = "LRPE"
 
+	// heartbeat events:
+	// leader heartbeat time out
+	// leader broadcast HeartBeat
+	// others receive HeartBeat
+	// leader receive HeartBeatResponse
+	BEAT logTopic = "BEAT"
+
 	// persistence events:
 	// restore stable entries from stable storage.
 	// restore term, vote, commit from hardstate.
+	// restore nodes config from confstate.
 	// persist unstable log entrie.
+	// update and save hardstate
+	// update and save applystate.
 	PERS logTopic = "PERS"
 
 	// peer handling events:
 	//	start raft module
 	//  propose new raft cmd
+	//  notify clients stale proposals.
 	//  process committed log entry/raft cmd
-	//  input to state machine
-	//  advance applied index
+	//  advance raft state
 	PEER logTopic = "PEER"
 
 	// snapshotting events:
@@ -161,16 +172,6 @@ func getVerbosityLevel() int {
 }
 
 //
-// persistence events.
-//
-
-func (l *Logger) startRaft() {
-	r := l.r
-	l.printf(PERS, "N%v START (T:%v V:%v CI:%v AI:%v SI:%v)", r.id, r.Term, r.Vote, r.RaftLog.committed,
-		r.RaftLog.applied, r.RaftLog.stabled)
-}
-
-//
 // leader election events.
 //
 
@@ -199,24 +200,34 @@ func (l *Logger) recvRVOT(m pb.Message) {
 	l.printf(ELEC, "N%v <- N%v RVOT (T:%v)", r.id, m.From, m.Term)
 }
 
-func (l *Logger) recvRVOTRes(m pb.Message) {
-	r := l.r
-	l.printf(ELEC, "N%v <- N%v RVOT RES (T:%v R:%v)", r.id, m.From, m.Term, m.Reject)
-}
-
 func (l *Logger) voteTo(to uint64) {
 	r := l.r
 	l.printf(ELEC, "N%v v-> N%v", r.id, to)
 }
 
-func (l *Logger) stateToLeader() {
-	r := l.r
-	l.printf(ELEC, "N%v %v->%v (T:%v)", r.id, r.State, StateLeader, r.Term)
-}
-
 func (l *Logger) rejectVoteTo(to uint64) {
 	r := l.r
 	l.printf(ELEC, "N%v !v-> N%v", r.id, to)
+}
+
+func (l *Logger) recvRVOTRes(m pb.Message) {
+	r := l.r
+	l.printf(ELEC, "N%v <- N%v RVOT RES (T:%v R:%v)", r.id, m.From, m.Term, m.Reject)
+}
+
+func (l *Logger) recvVoteQuorum(num_supports uint64) {
+	r := l.r
+	l.printf(ELEC, "N%v <- VOTE QUORUM (T:%v NS:%v NN:%v)", r.id, r.Term, num_supports, len(r.Prs))
+}
+
+func (l *Logger) recvDenyQuorum(num_denials uint64) {
+	r := l.r
+	l.printf(ELEC, "N%v <- DENY QUORUM (T:%v ND:%v NN:%v)", r.id, r.Term, num_denials, len(r.Prs))
+}
+
+func (l *Logger) stateToLeader() {
+	r := l.r
+	l.printf(ELEC, "N%v %v->%v (T:%v)", r.id, r.State, StateLeader, r.Term)
 }
 
 func (l *Logger) stateToFollower(oldTerm uint64) {
@@ -231,9 +242,6 @@ func (l *Logger) stateToFollower(oldTerm uint64) {
 func (l *Logger) recvPROP(m pb.Message) {
 	r := l.r
 	l.printf(LRPE, "N%v <- PROP (LN:%v)", r.id, len(m.Entries))
-	// for _, ent := range m.Entries {
-	// l.printf(LRPE, "N%v    (D:%v)", r.id, string(ent.Data))
-	// }
 }
 
 func (l *Logger) appendEnts(ents []pb.Entry) {
@@ -253,9 +261,9 @@ func (l *Logger) sendEnts(prevLogIndex, prevLogTerm uint64, ents []pb.Entry, to 
 	l.printEnts(LRPE, r.id, ents)
 }
 
-func (l *Logger) acceptEnts(from uint64) {
+func (l *Logger) recvAENT(m pb.Message) {
 	r := l.r
-	l.printf(LRPE, "N%v &e<- N%v", r.id, from)
+	l.printf(LRPE, "N%v <- N%v AENT (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, m.From, m.Term, m.Commit, m.Index, m.LogTerm, len(m.Entries))
 }
 
 var reasonMap = [...]string{
@@ -269,10 +277,20 @@ func (l *Logger) rejectEnts(reason pb.RejectReason, from uint64) {
 	l.printf(LRPE, "N%v !e<- N%v COZ %v", r.id, from, reasonMap[reason])
 }
 
+func (l *Logger) acceptEnts(from uint64) {
+	r := l.r
+	l.printf(LRPE, "N%v &e<- N%v", r.id, from)
+}
+
 func (l *Logger) discardEnts(ents []pb.Entry) {
 	r := l.r
 	l.printf(LRPE, "N%v -e (LN:%v)", r.id, len(ents))
 	l.printEnts(LRPE, r.id, ents)
+}
+
+func (l *Logger) recvAENTRes(m pb.Message) {
+	r := l.r
+	l.printf(LRPE, "N%v <- N%v AENT RES (T:%v R:%v RR:%v NI:%v CT:%v)", r.id, m.From, m.Term, m.Reject, reasonMap[m.Reason], m.NextIndex, m.ConflictTerm)
 }
 
 func (l *Logger) updateProgOf(id, oldNext, oldMatch, newNext, newMatch uint64) {
@@ -295,50 +313,6 @@ func (l *Logger) updateApplied(oldApplied uint64) {
 	l.printf(LRPE, "N%v ^ai (AI:%v) -> (AI:%v)", r.id, oldApplied, r.RaftLog.applied)
 }
 
-func (l *Logger) recvAENT(m pb.Message) {
-	r := l.r
-	l.printf(LRPE, "N%v <- N%v AENT (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, m.From, m.Term, m.Commit, m.Index, m.LogTerm, len(m.Entries))
-}
-
-func (l *Logger) recvAENTRes(m pb.Message) {
-	r := l.r
-	l.printf(LRPE, "N%v <- N%v AENT RES (T:%v R:%v RR:%v NI:%v CT:%v)", r.id, m.From, m.Term, m.Reject, m.Reason, m.NextIndex, m.ConflictTerm)
-}
-
-//
-// heartbeat events.
-//
-
-func (l *Logger) recvBEAT() {
-	r := l.r
-	l.printf(LRPE, "N%v <- BEAT", r.id)
-}
-
-func (l *Logger) recvHBET(m pb.Message) {
-	r := l.r
-	l.printf(LRPE, "N%v <- BEAT (T:%v CI:%v)", r.id, m.Term, m.Commit)
-}
-
-func (l *Logger) bcastHBET() {
-	r := l.r
-	l.printf(LRPE, "N%v @ HBET", r.id)
-}
-
-func (l *Logger) beatTimeout() {
-	r := l.r
-	l.printf(LRPE, "N%v BTO (S:%v T:%v)", r.id, r.State, r.Term)
-}
-
-//
-// persistence event logging.
-//
-
-func (l *Logger) restoreEnts(ents []pb.Entry) {
-	r := l.r
-	l.printf(PERS, "N%v RESTORE ENTS (LN:%v)", r.id, len(ents))
-	l.printEnts(PERS, r.id, ents)
-}
-
 func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 	for _, ent := range ents {
 		// l.printf(topic, "N%v    (I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
@@ -347,12 +321,60 @@ func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 }
 
 //
-// process requests events.
+// heartbeat events.
 //
 
-func (l *Logger) ProcessedProp(propIndex uint64) {
+func (l *Logger) beatTimeout() {
 	r := l.r
-	l.printf(PEER, "N%v PROCESSED PROP %v", r.id, propIndex)
+	l.printf(BEAT, "N%v BTO (S:%v T:%v)", r.id, r.State, r.Term)
+}
+
+func (l *Logger) recvBEAT() {
+	r := l.r
+	l.printf(BEAT, "N%v <- BEAT", r.id)
+}
+
+func (l *Logger) bcastHBET() {
+	r := l.r
+	l.printf(BEAT, "N%v @ HBET", r.id)
+}
+
+func (l *Logger) recvHBET(m pb.Message) {
+	r := l.r
+	l.printf(BEAT, "N%v <- HBET (T:%v CI:%v)", r.id, m.Term, m.Commit)
+}
+
+//
+// persistence events.
+//
+
+func (l *Logger) restoreEnts(ents []pb.Entry) {
+	r := l.r
+	l.printf(PERS, "N%v re (LN:%v)", r.id, len(ents))
+	l.printEnts(PERS, r.id, ents)
+}
+
+func (l *Logger) restoreHardState(hardState *pb.HardState) {
+	r := l.r
+	l.printf(PERS, "N%v +hs (T:%v V:%v CI:%v)", r.id, hardState.Term, hardState.Vote, hardState.Commit)
+}
+
+func (l *Logger) restoreConfState(confState *pb.ConfState) {
+	r := l.r
+	l.printf(PERS, "N%v +cs (NN:%v)", r.id, len(confState.Nodes))
+}
+
+func (l *Logger) PersistEnts(lastStabledIndex uint64) {
+	r := l.r
+	// be: backup entries.
+	l.printf(PERS, "N%v be (SI:%v)", r.id, lastStabledIndex)
+}
+
+func (l *Logger) UpdateHardState(curHardState pb.HardState) {
+	r := l.r
+	prevHardState := r.hardState()
+	l.printf(PERS, "N%v ^hs (T:%v V:%v CI:%v) -> (T:%v V:%v CI:%v)", r.id, prevHardState.Term,
+		prevHardState.Vote, prevHardState.Commit, curHardState.Term, curHardState.Vote, curHardState.Commit)
 }
 
 func (l *Logger) UpdateApplyState(oldAppliedIndex, newAppliedIndex uint64) {
@@ -360,24 +382,62 @@ func (l *Logger) UpdateApplyState(oldAppliedIndex, newAppliedIndex uint64) {
 	l.printf(PERS, "N%v ^as (AI:%v) -> (AI:%v)", r.id, oldAppliedIndex, newAppliedIndex)
 }
 
-func (l *Logger) NewProposal(m *raft_cmdpb.RaftCmdRequest) {
+//
+// peer interaction events.
+//
+
+func (l *Logger) startRaft() {
+	r := l.r
+	l.printf(PEER, "N%v START (T:%v V:%v CI:%v AI:%v SI:%v)", r.id, r.Term, r.Vote, r.RaftLog.committed,
+		r.RaftLog.applied, r.RaftLog.stabled)
+}
+
+func (l *Logger) NewProposal(m *raft_cmdpb.RaftCmdRequest, propIndex, propTerm uint64) {
 	r := l.r
 	for _, request := range m.Requests {
 		switch request.CmdType {
 		case raft_cmdpb.CmdType_Get:
-			l.printf(PEER, "N%v <- GET (K:%v)", r.id, string(request.Get.Key))
+			l.printf(PEER, "N%v <- GET (K:%v) (I:%v T:%v)", r.id, string(request.Get.Key), propIndex, propTerm)
 
 		case raft_cmdpb.CmdType_Put:
-			l.printf(PEER, "N%v <- PUT (K:%v V:%v)", r.id, string(request.Put.Key), string(request.Put.Value))
+			l.printf(PEER, "N%v <- PUT (K:%v V:%v) (I:%v T:%v)", r.id, string(request.Put.Key), string(request.Put.Value), propIndex, propTerm)
 
 		case raft_cmdpb.CmdType_Delete:
-			l.printf(PEER, "N%v <- DEL (K:%v)", r.id, string(request.Delete.Key))
+			l.printf(PEER, "N%v <- DEL (K:%v) (I:%v T:%v)", r.id, string(request.Delete.Key), propIndex, propTerm)
 
 		case raft_cmdpb.CmdType_Snap:
-			l.printf(PEER, "N%v <- SNP", r.id)
+			l.printf(PEER, "N%v <- SNP (I:%v T:%v)", r.id, propIndex, propTerm)
 
 		default:
 			panic("unknown cmd type")
 		}
 	}
 }
+
+func (l *Logger) NotifyStaleProp(propIndex, propTerm, entIndex, entTerm uint64) {
+	r := l.r
+	l.printf(PEER, "N%v STALE PROP (PI:%v PT:%v I%v: T:%v)", r.id, propIndex, propTerm, entIndex, entTerm)
+}
+
+func (l *Logger) ProcessedProp(propIndex uint64) {
+	r := l.r
+	l.printf(PEER, "N%v PROC PROP %v", r.id, propIndex)
+}
+
+func (l *Logger) Advance() {
+	r := l.r
+	l.printf(PEER, "N%v ADV", r.id)
+}
+
+func (l *Logger) AdvanceRaft(oldStabled, oldApplied, oldLastIncludedIndex,
+	oldLastIncludedTerm, prevTerm, prevVote, prevCommit uint64) {
+	r := l.r
+	hardState := r.hardState()
+	l.printf(PEER, "N%v ADV RAFT (SI:%v AI:%v LI:%v LT:%v HT:%v HV:%v HC:%v) -> (SI:%v AI:%v LI:%v LT:%v HT:%v HV:%v HC:%v)",
+		r.id, oldStabled, oldApplied, oldLastIncludedIndex, oldLastIncludedTerm, prevTerm, prevVote, prevCommit,
+		r.RaftLog.stabled, r.RaftLog.applied, r.RaftLog.lastIncludedIndex, r.RaftLog.lastIncludedTerm,
+		hardState.Term, hardState.Vote, hardState.Commit)
+}
+
+// func (l *Logger) UpdateProposals(oldProposals, newProposals []*peer.proposal) {
+// }

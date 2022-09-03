@@ -161,7 +161,6 @@ func newRaft(c *Config) *Raft {
 	l := r.RaftLog
 	if l.stabled != 0 {
 		r.Logger.restoreEnts(l.allEntries())
-		r.Logger.updateStabled(0)
 	}
 
 	// restore persisted states.

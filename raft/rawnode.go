@@ -194,15 +194,25 @@ func (rn *RawNode) HasReady() bool {
 // try to advance stabled index if there're unstable entries to be persisted.
 // try to install a new snapshot if there's one pending snapshot.
 func (rn *RawNode) Advance(rd Ready) {
-	// committed entries were applied to the state machine.
+	rn.Raft.Logger.Advance()
+
 	l := rn.Raft.RaftLog
-	// note, no need to check rd.CommittedEntries != nil, since len(nil) returns 0.
-	if len(rd.CommittedEntries) > 0 {
-		rn.Raft.tryUpdateApplied(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
-	}
+	// oldStabled := l.stabled
+	// oldApplied := l.applied
+	// oldLastIncludedIndex := l.lastIncludedIndex
+	// oldLastIncludedTerm := l.lastIncludedTerm
+	// prevTerm := rn.prevHardState.Term
+	// prevVote := rn.prevHardState.Vote
+	// prevCommit := rn.prevHardState.Commit
+
 	// unstable entries were persisted to the stable storage.
 	if len(rd.Entries) > 0 {
 		rn.Raft.tryUpdateStabled(rd.Entries[len(rd.Entries)-1].Index)
+	}
+	// committed entries were applied to the state machine.
+	// note, no need to check rd.CommittedEntries != nil, since len(nil) returns 0.
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.tryUpdateApplied(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
 	if !IsEmptySnap(&rd.Snapshot) {
 		l.lastIncludedIndex = rd.Snapshot.Metadata.Index
@@ -211,6 +221,9 @@ func (rn *RawNode) Advance(rd Ready) {
 	if !IsEmptyHardState(rd.HardState) {
 		rn.prevHardState = rd.HardState
 	}
+
+	// rn.Raft.Logger.AdvanceRaft(oldStabled, oldApplied, oldLastIncludedIndex,
+	// 	oldLastIncludedTerm, prevTerm, prevVote, prevCommit)
 }
 
 // GetProgress return the Progress of this node and its peers, if this
