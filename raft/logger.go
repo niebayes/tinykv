@@ -13,7 +13,7 @@ import (
 )
 
 // true to turn on debugging/logging.
-const debug = false
+const debug = true
 const LOGTOFILE = false
 
 // what topic the log message is related to.
@@ -211,9 +211,10 @@ var denyReasonMap = [...]string{
 	"STL", // you're stale.
 }
 
-func (l *Logger) rejectVoteTo(to uint64, reason pb.DenyVoteReason) {
+func (l *Logger) rejectVoteTo(to uint64, reason pb.DenyVoteReason, CandidatelastLogIndex, CandidatelastLogTerm, lastLogIndex, lastLogTerm uint64) {
 	r := l.r
-	l.printf(ELEC, "N%v !v-> N%v COZ %v", r.id, to, denyReasonMap[reason])
+	l.printf(ELEC, "N%v !v-> N%v COZ %v (CLI:%v CLT:%v LI:%v LT:%v)", r.id, to,
+		denyReasonMap[reason], CandidatelastLogIndex, CandidatelastLogTerm, lastLogIndex, lastLogTerm)
 }
 
 func (l *Logger) recvRVOTRes(m pb.Message) {
@@ -306,7 +307,7 @@ func (l *Logger) updateProgOf(id, oldNext, oldMatch, newNext, newMatch uint64) {
 
 func (l *Logger) recvAppendQuorum(cnt int) {
 	r := l.r
-	l.printf(ELEC, "N%v <- APED QUORUM (T:%v NA:%v NN:%v)", r.id, cnt, len(r.Prs))
+	l.printf(ELEC, "N%v <- APED QUORUM (NA:%v NN:%v)", r.id, cnt, len(r.Prs))
 }
 
 func (l *Logger) updateCommitted(oldCommitted uint64) {

@@ -57,9 +57,9 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 		r.resetVoteRecord()
 	}
 	r.Lead = lead
-	r.State = StateFollower
 
 	r.Logger.stateToFollower(oldTerm)
+	r.State = StateFollower
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -113,13 +113,11 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		r.becomeFollower(m.Term, None)
 	}
 
-	reject, reason := r.checkVoteRestriction(m)
+	reject := r.checkVoteRestriction(m)
 
 	if !reject {
 		r.Vote = m.From
 		r.Logger.voteTo(m.From)
-	} else {
-		r.Logger.rejectVoteTo(m.From, reason)
 	}
 
 	// reset election timer since I've granted the vote and this may result in spawning a new leader.
@@ -222,27 +220,27 @@ func (r *Raft) resetElectionTimer() {
 }
 
 // return true if able to grant the vote, false otherwise.
-func (r *Raft) checkVoteRestriction(m pb.Message) (bool, pb.DenyVoteReason) {
+func (r *Raft) checkVoteRestriction(m pb.Message) bool {
+	// candidate's last log index and term.
+	lastLogIndex := m.Index
+	lastLogTerm := m.LogTerm
+	// my last log index and term.
+	l := r.RaftLog
+	li := l.LastIndex()
+	lt, _ := l.Term(li)
+
 	if r.Vote == None || r.Vote == m.From {
 		// further restriction:
 		// only grant the vote iff the candidate's log is at least as up-to-date as my log.
-
-		// candidate's last log index and term.
-		lastLogIndex := m.Index
-		lastLogTerm := m.LogTerm
-		// my last log index and term.
-		l := r.RaftLog
-		li := l.LastIndex()
-		lt, _ := l.Term(li)
-
-		// ok = true if the candidate has more up-to-date log than me.
-		ok := (lastLogTerm > lt) || (lastLogTerm == lt && lastLogIndex >= li)
-		if !ok {
-			return true, pb.DenyVoteReason_STALE
+		grant := (lastLogTerm > lt) || (lastLogTerm == lt && lastLogIndex >= li)
+		if !grant {
+			r.Logger.rejectVoteTo(m.From, pb.DenyVoteReason_STALE, lastLogIndex, lastLogTerm, li, lt)
+			return true
 		}
-		return false, pb.DenyVoteReason_GRANT
+		return false
 	}
-	return true, pb.DenyVoteReason_VOTED
+	r.Logger.rejectVoteTo(m.From, pb.DenyVoteReason_VOTED, lastLogIndex, lastLogTerm, li, lt)
+	return true
 }
 
 // reset progress of each peer except this node itself.

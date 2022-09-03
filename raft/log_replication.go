@@ -442,8 +442,11 @@ func (r *Raft) checkQuorumAppend(index uint64) bool {
 			}
 		}
 	}
-	r.Logger.recvAppendQuorum(cnt)
-	return 2*cnt > len(r.Prs)
+	ok := 2*cnt > len(r.Prs)
+	if ok {
+		r.Logger.recvAppendQuorum(cnt)
+	}
+	return ok
 }
 
 func (r *Raft) maybeUpdateCommitIndex() bool {

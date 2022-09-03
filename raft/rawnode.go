@@ -194,7 +194,11 @@ func (rn *RawNode) HasReady() bool {
 // try to advance stabled index if there're unstable entries to be persisted.
 // try to install a new snapshot if there's one pending snapshot.
 func (rn *RawNode) Advance(rd Ready) {
-	rn.Raft.Logger.Advance()
+	// do not logging if there're only msgs to be sent.
+	if len(rd.Entries) > 0 || len(rd.CommittedEntries) > 0 ||
+		!IsEmptySnap(&rd.Snapshot) || !IsEmptyHardState(rd.HardState) {
+		rn.Raft.Logger.Advance()
+	}
 
 	l := rn.Raft.RaftLog
 	// oldStabled := l.stabled
