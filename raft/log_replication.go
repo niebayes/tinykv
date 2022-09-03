@@ -91,6 +91,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	l := r.RaftLog
 
 	// log consistency check: log has an entry at index prevLogIndex and with the same term.
+	// TODO: add a more elaborated logging.
 	if prevLogIndex > l.lastIncludedIndex {
 		ent, err := l.Entry(prevLogIndex)
 		if err != nil {
@@ -110,7 +111,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 				NextIndex: l.LastIndex() + 1,
 			})
 
-			r.Logger.rejectEnts(pb.RejectReason_IndexConflict, m.From)
+			r.Logger.rejectEnts(pb.RejectReason_IndexConflict, m.From, prevLogIndex, prevLogTerm)
 			return
 
 		} else if ent.Term != prevLogTerm {
@@ -142,7 +143,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 				ConflictTerm: conflictTerm,
 			})
 
-			r.Logger.rejectEnts(pb.RejectReason_TermConflict, m.From)
+			r.Logger.rejectEnts(pb.RejectReason_TermConflict, m.From, prevLogIndex, prevLogTerm)
 			return
 		}
 	}

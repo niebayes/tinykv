@@ -172,6 +172,10 @@ func newRaft(c *Config) *Raft {
 
 	r.raftInitLogIndex = hardstate.Commit
 
+	// TODO: restore AppliedIndex from cfg upon restart.
+	// FIXME: is this reasonable/necessary?
+	l.applied = c.Applied
+
 	// TODO: restore persisted log from snapshot.
 
 	r.resetElectionTimer()

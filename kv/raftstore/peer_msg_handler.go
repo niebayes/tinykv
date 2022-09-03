@@ -171,8 +171,85 @@ func (d *peerMsgHandler) processNoopEntry(ent eraftpb.Entry) {
 	if err != nil {
 		panic(err)
 	}
+	// FIXME: Seems error occurs here.
 	if oldAppliedIndex != applyState.AppliedIndex {
 		d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
+	}
+}
+
+func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest, p *proposal) *raft_cmdpb.RaftCmdResponse {
+	kvWB := new(engine_util.WriteBatch)
+	cmd_resp := newCmdResp()
+
+	// only handle requests if it's not a no-op entry,
+	// since a no-op entry is appended by the raft module itself.
+	if len(ent.Data) > 0 {
+		for _, request := range cmd.Requests {
+			d.handleRequest(request, cmd_resp, kvWB, p)
+		}
+	}
+
+	applyState := d.peerStorage.applyState
+	oldAppliedIndex := applyState.AppliedIndex
+
+	// advance and persist apply index.
+	d.updateApplyState(ent.Index, kvWB)
+
+	// apply the batch of writes.
+	err := kvWB.WriteToDB(d.ctx.engine.Kv)
+	if err != nil {
+		panic(err)
+	}
+
+	if oldAppliedIndex != applyState.AppliedIndex {
+		d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
+	}
+
+	d.RaftGroup.Raft.Logger.ProcessedProp(ent.Index)
+
+	return cmd_resp
+}
+
+func (d *peerMsgHandler) processNonLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) {
+	d.processRaftCommand(ent, cmd, nil)
+}
+
+func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) {
+	// find the corresponding proposal of this log entry.
+	stale_index := 0 // the start index of the proposals array after processing.
+	update := false  // do I need to update proposal array?
+	for i := 0; !d.stopped && i < len(d.proposals); i++ {
+		p := d.proposals[i]
+		if p.index < ent.Index || p.term < ent.Term {
+			NotifyStaleReq(d.Term(), p.cb)
+			d.RaftGroup.Raft.Logger.NotifyStaleProp(p.index, p.term, ent.Index, ent.Term)
+			stale_index = i
+			update = true
+
+		} else if p.index == ent.Index && p.term == ent.Term {
+
+			cmd_resp := d.processRaftCommand(ent, cmd, p)
+
+			// notify the client.
+			p.cb.Done(cmd_resp)
+			d.RaftGroup.Raft.Logger.NotifyClient(p.index)
+
+			// this cmd was processed and hence it's also marked staled.
+			stale_index = i
+			update = true
+			break
+		}
+	}
+
+	// the start index of the remaining proposals after discarding stale and processed proposals.
+	// TODO: ensure the proposal truncation is correct.
+	if update {
+		newi := stale_index + 1
+		if newi >= len(d.proposals) {
+			d.proposals = d.proposals[:0]
+		} else {
+			d.proposals = d.proposals[newi:]
+		}
 	}
 }
 
@@ -190,66 +267,12 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 		return
 	}
 
-	// find the corresponding proposal of this log entry.
-	stale_index := 0 // the start index of the proposals array after processing.
-	for i := 0; !d.stopped && i < len(d.proposals); i++ {
-		p := d.proposals[i]
-		if p.index < ent.Index || p.term < ent.Term {
-			// only leader is responsible for notifying the clients.
-			if d.IsLeader() {
-				NotifyStaleReq(d.Term(), p.cb)
-				d.RaftGroup.Raft.Logger.NotifyStaleProp(p.index, p.term, ent.Index, ent.Term)
-			}
-			stale_index = i
-
-		} else if p.index == ent.Index && p.term == ent.Term {
-			// each raft cmd corresponds to one batch of writes.
-			kvWB := new(engine_util.WriteBatch)
-			cmd_resp := newCmdResp()
-
-			// only handle requests if it's not a no-op entry,
-			// since a no-op entry is appended by the raft module itself.
-			if len(ent.Data) > 0 {
-				for _, request := range cmd.Requests {
-					d.handleRequest(request, cmd_resp, kvWB, p)
-				}
-			}
-
-			// advance and persist apply index.
-			d.updateApplyState(ent.Index, kvWB)
-
-			// FIXME: Is is checking reasonable?
-			if d.stopped {
-				return
-			}
-
-			// apply the batch of writes.
-			err = kvWB.WriteToDB(d.ctx.engine.Kv)
-			if err != nil {
-				panic(err)
-			}
-
-			// notify the client.
-			if d.IsLeader() {
-				d.RaftGroup.Raft.Logger.ProcessedProp(p.index)
-				p.cb.Done(cmd_resp)
-			}
-			// this cmd was processed and hence it's also marked staled.
-			stale_index = i
-			break
-		}
-	}
-
-	// the start index of the remaining proposals after discarding stale and processed proposals.
-	// oldProposals := make([]*proposal, 0)
-	// copy(oldProposals, d.proposals)
-	newi := stale_index + 1
-	if newi >= len(d.proposals) {
-		d.proposals = d.proposals[:0]
+	// leader and non-leaders has different behaviors on processing a raft cmd.
+	if d.IsLeader() {
+		d.processLeader(ent, cmd)
 	} else {
-		d.proposals = d.proposals[newi+1:]
+		d.processNonLeader(ent, cmd)
 	}
-	// d.RaftGroup.Raft.Logger.UpdateProposals(oldProposals, d.proposals)
 }
 
 func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch, p *proposal) {
@@ -260,6 +283,8 @@ func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *ra
 			CmdType: raft_cmdpb.CmdType_Get,
 			Get:     resp,
 		})
+		// l := makeLogger(false, "")
+		// l.GetResponse(d.PeerId(), p.index, request.Get.Key, resp.Value)
 		// log.Infof("N%v processed Get request: key %v \n", d.PeerId(), string(request.Get.Key))
 
 	case raft_cmdpb.CmdType_Put:
@@ -313,14 +338,15 @@ func (d *peerMsgHandler) handleDeleteRequest(request *raft_cmdpb.Request, kvWB *
 }
 
 func (d *peerMsgHandler) handleSnapRequest(request *raft_cmdpb.Request, p *proposal) *raft_cmdpb.SnapResponse {
-	// TODO: handle snapshot request.
 	response := &raft_cmdpb.SnapResponse{
 		Region: d.Region(),
 	}
 	// TODO: wrap these to a hint.
 	// when a client wishes to read the kv, the storage returns it a snapshot which is wrapped into
 	// a txn. So, we start a new txn here, and let the service handler discards the txn.
-	p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+	if p != nil {
+		p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+	}
 	return response
 }
 

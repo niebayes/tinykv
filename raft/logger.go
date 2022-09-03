@@ -8,12 +8,13 @@ import (
 	"time"
 
 	// "github.com/pingcap-incubator/tinykv/kv/raftstore/peer"
+	"github.com/pingcap-incubator/tinykv"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
 
 // true to turn on debugging/logging.
-const debug = true
+const debug = tinykv.DEBUG
 const LOGTOFILE = false
 
 // what topic the log message is related to.
@@ -279,9 +280,14 @@ var reasonMap = [...]string{
 	"TC", // term conflict.
 }
 
-func (l *Logger) rejectEnts(reason pb.RejectReason, from uint64) {
+func (l *Logger) rejectEnts(reason pb.RejectReason, from, prevLogIndex, prevLogTerm uint64) {
 	r := l.r
-	l.printf(LRPE, "N%v !e<- N%v COZ %v", r.id, from, reasonMap[reason])
+	if reason == pb.RejectReason_IndexConflict {
+		l.printf(LRPE, "N%v !e<- N%v COZ %v (PI:%v LI:%v)", r.id, from, reasonMap[reason], prevLogIndex, r.RaftLog.LastIndex())
+	} else {
+		term, _ := r.RaftLog.Term(prevLogIndex)
+		l.printf(LRPE, "N%v !e<- N%v COZ %v (PT:%v T:%v)", r.id, from, reasonMap[reason], prevLogTerm, term)
+	}
 }
 
 func (l *Logger) acceptEnts(from uint64) {
@@ -353,7 +359,7 @@ func (l *Logger) bcastHBET() {
 
 func (l *Logger) recvHBET(m pb.Message) {
 	r := l.r
-	l.printf(BEAT, "N%v <- HBET (T:%v CI:%v)", r.id, m.Term, m.Commit)
+	l.printf(BEAT, "N%v <- N%v HBET (T:%v CI:%v)", r.id, m.From, m.Term, m.Commit)
 }
 
 //
@@ -429,6 +435,11 @@ func (l *Logger) NewProposal(m *raft_cmdpb.RaftCmdRequest, propIndex, propTerm u
 func (l *Logger) NotifyStaleProp(propIndex, propTerm, entIndex, entTerm uint64) {
 	r := l.r
 	l.printf(PEER, "N%v STALE PROP (PI:%v PT:%v I%v: T:%v)", r.id, propIndex, propTerm, entIndex, entTerm)
+}
+
+func (l *Logger) NotifyClient(propIndex uint64) {
+	r := l.r
+	l.printf(PEER, "N%v NOTIFY PROP %v", r.id, propIndex)
 }
 
 func (l *Logger) ProcessedProp(propIndex uint64) {

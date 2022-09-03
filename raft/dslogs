@@ -11,6 +11,7 @@ from rich.traceback import install
 
 # fmt: off
 # Mapping from topics to colors
+# TODO: Change colors.
 TOPICS = {
     "ELEC": "#4878bc",
     "LRPE": "#ff615c",

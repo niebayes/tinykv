@@ -1,4 +1,4 @@
-package test_raftstore
+package raftstore
 
 import (
 	"fmt"
@@ -18,7 +18,7 @@ const LOGTOFILE = false
 type logTopic string
 
 const (
-	TEST logTopic = "TEST"
+	PEER logTopic = "PEER"
 )
 
 type Logger struct {
@@ -104,14 +104,6 @@ func getVerbosityLevel() int {
 // partition events.
 //
 
-func (l *Logger) NewConf(s1, s2 []uint64) {
-	l.printf(TEST, "s1:%v  s2:%v", s1, s2)
-}
-
-func (l *Logger) AddFilter() {
-	l.printf(TEST, "ADD FILTER")
-}
-
-func (l *Logger) ClearFilter() {
-	l.printf(TEST, "REM FILTER")
+func (l *Logger) GetResponse(peerId, propIndex uint64, key []byte, val []byte) {
+	l.printf(PEER, "N%v GET PROP %v RESP (K:%v V:%v)", peerId, propIndex, string(key), string(val))
 }
