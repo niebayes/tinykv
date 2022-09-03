@@ -2,15 +2,17 @@ package raft
 
 import (
 	"fmt"
-	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"log"
 	"os"
 	"strconv"
 	"time"
+
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
 
 // true to turn on debugging/logging.
-const debug = false
+const debug = true
 const LOGTOFILE = false
 
 // what topic the log message is related to.
@@ -18,36 +20,64 @@ const LOGTOFILE = false
 type logTopic string
 
 const (
-	// leader election events:
-	//   receive MsgHup
-	//   election timeout
-	//   become candidate
-	//   broadcast RequestVote
-	//   grant vote
-	//   deny vote
-	//   become follower
-	//   become leader
-	dElect logTopic = "ELEC"
+	// the typical route of leader election is:
+	// 	becomeFollower
+	//		election time out
+	//		send MsgHup to self
+	//	becomeCandidate
+	//  bcastRequestVote
+	//		other peers: handleRequestVote
+	//			grant vote
+	//			deny vote
+	//	handleRequestVoteResponse
+	//		receive a majority of votes
+	// 	becomeLeader
+	//		append a noop entry
+	//		bcast the noop entry
+	ELEC logTopic = "ELEC"
 
-	// log replication events:
-	dReplicate logTopic = "LRPE" // log replication events: leader append new logs, leader detect new logs, leader sends new logs, log consistency check, follower handle conflicts, follower appends new logs, leader updates next index.
-
-	// peer handling events:
-	//   propose new raft cmd
-	//   persist unstable log entries
-	//   process committed log entry/raft cmd
-	//   input to state machine
-	//   advance applied index
-	dPeer logTopic = "CLNT" // client interaction events: start server, receive client's agreement request, apply new ApplyMsg to client.
+	// the typical route of log replication is:
+	//	receive MsgProp
+	//		peer proposes a set of log entries to be replicated
+	//		append these log entries
+	//	bcastAppendEntries
+	//		other peers: handleAppendEntries
+	//			reject the whole entries due to index conflict or term conflict
+	//			accept the whole entries but discard conflicting entries and only append missing entries.
+	//	handleAppendEntriesResponse
+	//		leader update follower's progress: next index and match index 
+	//		leader knows which entries are committed
+	//	bcastHeartbeat
+	//		other peers know which entries are committed
+	// 	handleHeartbeatResponse
+	//		leader notifys slow followers and send AppendEntries to make them catch up.
+	//		...
+	//		all alive followers commit the log entries
+	//
+	LRPE logTopic = "LRPE"
 
 	// persistence events:
-	dPersist logTopic = "PERS" // persistence events: backup, restore.
+	// restore stable entries from stable storage.
+	// restore term, vote, commit from hardstate.
+	// persist unstable log entrie.
+	PERS logTopic = "PERS"
 
-	// snapshot events:
-	dSnap logTopic = "SNAP" // snapshotting events: service sends a snapshot, server snapshots, leader detects a follower is lagging hebind, leader sends InstallSnapshot to lagged follower, follower forwards snapshot to service, service conditionally installs a snapshot by asking Raft.
+	// peer handling events:
+	//	start raft module
+	//  propose new raft cmd
+	//  process committed log entry/raft cmd
+	//  input to state machine
+	//  advance applied index
+	PEER logTopic = "PEER"
 
-	// drop messages events:
-	dDrop    logTopic = "REJC" // reject RPC events: term changes, state changes.
+	// snapshotting events:
+	// service sends a snapshot
+	// server snapshots
+	// leader detects a follower is lagging hebind
+	// leader sends InstallSnapshot to lagged follower
+	// follower forwards snapshot to service
+	// service conditionally installs a snapshot by asking Raft.
+	SNAP logTopic = "SNAP"
 )
 
 type Logger struct {
@@ -136,7 +166,7 @@ func getVerbosityLevel() int {
 
 func (l *Logger) startRaft() {
 	r := l.r
-	l.printf(dPersist, "N%v START (T:%v V:%v CI:%v AI:%v SI:%v)", r.id, r.Term, r.Vote, r.RaftLog.committed,
+	l.printf(PERS, "N%v START (T:%v V:%v CI:%v AI:%v SI:%v)", r.id, r.Term, r.Vote, r.RaftLog.committed,
 		r.RaftLog.applied, r.RaftLog.stabled)
 }
 
@@ -146,52 +176,52 @@ func (l *Logger) startRaft() {
 
 func (l *Logger) recvHUP() {
 	r := l.r
-	l.printf(dElect, "N%v <- HUP (T:%v)", r.id, r.Term)
+	l.printf(ELEC, "N%v <- HUP (T:%v)", r.id, r.Term)
 }
 
 func (l *Logger) elecTimeout() {
 	r := l.r
-	l.printf(dElect, "N%v ETO (S:%v T:%v)", r.id, r.State, r.Term)
+	l.printf(ELEC, "N%v ETO (S:%v T:%v)", r.id, r.State, r.Term)
 }
 
 func (l *Logger) stateToCandidate() {
 	r := l.r
-	l.printf(dElect, "N%v %v->%v (T:%v)", r.id, r.State, StateCandidate, r.Term)
+	l.printf(ELEC, "N%v %v->%v (T:%v)", r.id, r.State, StateCandidate, r.Term)
 }
 
 func (l *Logger) bcastRVOT() {
 	r := l.r
-	l.printf(dElect, "N%v @ RVOT (T:%v)", r.id, r.Term)
+	l.printf(ELEC, "N%v @ RVOT (T:%v)", r.id, r.Term)
 }
 
 func (l *Logger) recvRVOT(m pb.Message) {
 	r := l.r
-	l.printf(dElect, "N%v <- N%v RVOT (T:%v)", r.id, m.From, m.Term)
+	l.printf(ELEC, "N%v <- N%v RVOT (T:%v)", r.id, m.From, m.Term)
 }
 
 func (l *Logger) recvRVOTRes(m pb.Message) {
 	r := l.r
-	l.printf(dElect, "N%v <- N%v RVOT RES (T:%v R:%v)", r.id, m.From, m.Term, m.Reject)
+	l.printf(ELEC, "N%v <- N%v RVOT RES (T:%v R:%v)", r.id, m.From, m.Term, m.Reject)
 }
 
 func (l *Logger) voteTo(to uint64) {
 	r := l.r
-	l.printf(dElect, "N%v v-> N%v", r.id, to)
+	l.printf(ELEC, "N%v v-> N%v", r.id, to)
 }
 
 func (l *Logger) stateToLeader() {
 	r := l.r
-	l.printf(dElect, "N%v %v->%v (T:%v)", r.id, r.State, StateLeader, r.Term)
+	l.printf(ELEC, "N%v %v->%v (T:%v)", r.id, r.State, StateLeader, r.Term)
 }
 
 func (l *Logger) rejectVoteTo(to uint64) {
 	r := l.r
-	l.printf(dElect, "N%v !v-> N%v", r.id, to)
+	l.printf(ELEC, "N%v !v-> N%v", r.id, to)
 }
 
 func (l *Logger) stateToFollower(oldTerm uint64) {
 	r := l.r
-	l.printf(dElect, "N%v %v->%v (T:%v) -> (T:%v)", r.id, r.State, StateFollower, oldTerm, r.Term)
+	l.printf(ELEC, "N%v %v->%v (T:%v) -> (T:%v)", r.id, r.State, StateFollower, oldTerm, r.Term)
 }
 
 //
@@ -200,32 +230,32 @@ func (l *Logger) stateToFollower(oldTerm uint64) {
 
 func (l *Logger) recvPROP(m pb.Message) {
 	r := l.r
-	l.printf(dReplicate, "N%v <- PROP (LN:%v)", r.id, len(m.Entries))
-	for _, ent := range m.Entries {
-		l.printf(dReplicate, "N%v\t (D:%v)", r.id, string(ent.Data))
-	}
+	l.printf(LRPE, "N%v <- PROP (LN:%v)", r.id, len(m.Entries))
+	// for _, ent := range m.Entries {
+	// l.printf(LRPE, "N%v    (D:%v)", r.id, string(ent.Data))
+	// }
 }
 
 func (l *Logger) appendEnts(ents []pb.Entry) {
 	r := l.r
-	l.printf(dReplicate, "N%v +e (LN:%v)", r.id, len(ents))
-	l.printEnts(dReplicate, r.id, ents)
+	l.printf(LRPE, "N%v +e (LN:%v)", r.id, len(ents))
+	l.printEnts(LRPE, r.id, ents)
 }
 
 func (l *Logger) bcastAENT() {
 	r := l.r
-	l.printf(dReplicate, "N%v @ AENT", r.id)
+	l.printf(LRPE, "N%v @ AENT", r.id)
 }
 
 func (l *Logger) sendEnts(prevLogIndex, prevLogTerm uint64, ents []pb.Entry, to uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v e-> N%v (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, to, r.Term, r.RaftLog.committed, prevLogIndex, prevLogTerm, len(ents))
-	l.printEnts(dReplicate, r.id, ents)
+	l.printf(LRPE, "N%v e-> N%v (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, to, r.Term, r.RaftLog.committed, prevLogIndex, prevLogTerm, len(ents))
+	l.printEnts(LRPE, r.id, ents)
 }
 
 func (l *Logger) acceptEnts(from uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v &e<- N%v", r.id, from)
+	l.printf(LRPE, "N%v &e<- N%v", r.id, from)
 }
 
 var reasonMap = [...]string{
@@ -236,43 +266,43 @@ var reasonMap = [...]string{
 
 func (l *Logger) rejectEnts(reason pb.RejectReason, from uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v !e<- N%v COZ %v", r.id, from, reasonMap[reason])
+	l.printf(LRPE, "N%v !e<- N%v COZ %v", r.id, from, reasonMap[reason])
 }
 
 func (l *Logger) discardEnts(ents []pb.Entry) {
 	r := l.r
-	l.printf(dReplicate, "N%v -e (LN:%v)", r.id, len(ents))
-	l.printEnts(dReplicate, r.id, ents)
+	l.printf(LRPE, "N%v -e (LN:%v)", r.id, len(ents))
+	l.printEnts(LRPE, r.id, ents)
 }
 
 func (l *Logger) updateProgOf(id, oldNext, oldMatch, newNext, newMatch uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v ^pr N%v (NI:%v MI:%v) -> (NI:%v MI:%v)", r.id, id, oldNext, oldMatch, newNext, newMatch)
+	l.printf(LRPE, "N%v ^pr N%v (NI:%v MI:%v) -> (NI:%v MI:%v)", r.id, id, oldNext, oldMatch, newNext, newMatch)
 }
 
 func (l *Logger) updateCommitted(oldCommitted uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v ^ci (CI:%v) -> (CI:%v)", r.id, oldCommitted, r.RaftLog.committed)
+	l.printf(LRPE, "N%v ^ci (CI:%v) -> (CI:%v)", r.id, oldCommitted, r.RaftLog.committed)
 }
 
 func (l *Logger) updateStabled(oldStabled uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v ^si (SI:%v) -> (SI:%v)", r.id, oldStabled, r.RaftLog.stabled)
+	l.printf(LRPE, "N%v ^si (SI:%v) -> (SI:%v)", r.id, oldStabled, r.RaftLog.stabled)
 }
 
 func (l *Logger) updateApplied(oldApplied uint64) {
 	r := l.r
-	l.printf(dReplicate, "N%v ^ai (AI:%v) -> (AI:%v)", r.id, oldApplied, r.RaftLog.applied)
+	l.printf(LRPE, "N%v ^ai (AI:%v) -> (AI:%v)", r.id, oldApplied, r.RaftLog.applied)
 }
 
 func (l *Logger) recvAENT(m pb.Message) {
 	r := l.r
-	l.printf(dReplicate, "N%v <- N%v AENT (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, m.From, m.Term, m.Commit, m.Index, m.LogTerm, len(m.Entries))
+	l.printf(LRPE, "N%v <- N%v AENT (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, m.From, m.Term, m.Commit, m.Index, m.LogTerm, len(m.Entries))
 }
 
 func (l *Logger) recvAENTRes(m pb.Message) {
 	r := l.r
-	l.printf(dReplicate, "N%v <- N%v AENT RES (T:%v R:%v RR:%v NI:%v CT:%v)", r.id, m.From, m.Term, m.Reject, m.Reason, m.NextIndex, m.ConflictTerm)
+	l.printf(LRPE, "N%v <- N%v AENT RES (T:%v R:%v RR:%v NI:%v CT:%v)", r.id, m.From, m.Term, m.Reject, m.Reason, m.NextIndex, m.ConflictTerm)
 }
 
 //
@@ -281,22 +311,22 @@ func (l *Logger) recvAENTRes(m pb.Message) {
 
 func (l *Logger) recvBEAT() {
 	r := l.r
-	l.printf(dReplicate, "N%v <- BEAT", r.id)
+	l.printf(LRPE, "N%v <- BEAT", r.id)
 }
 
 func (l *Logger) recvHBET(m pb.Message) {
 	r := l.r
-	l.printf(dReplicate, "N%v <- BEAT (T:%v CI:%v)", r.id, m.Term, m.Commit)
+	l.printf(LRPE, "N%v <- BEAT (T:%v CI:%v)", r.id, m.Term, m.Commit)
 }
 
 func (l *Logger) bcastHBET() {
 	r := l.r
-	l.printf(dReplicate, "N%v @ HBET", r.id)
+	l.printf(LRPE, "N%v @ HBET", r.id)
 }
 
 func (l *Logger) beatTimeout() {
 	r := l.r
-	l.printf(dReplicate, "N%v BTO (S:%v T:%v)", r.id, r.State, r.Term)
+	l.printf(LRPE, "N%v BTO (S:%v T:%v)", r.id, r.State, r.Term)
 }
 
 //
@@ -305,13 +335,14 @@ func (l *Logger) beatTimeout() {
 
 func (l *Logger) restoreEnts(ents []pb.Entry) {
 	r := l.r
-	l.printf(dPersist, "N%v RESTORE ENTS (LN:%v)", r.id, len(ents))
-	l.printEnts(dPersist, r.id, ents)
+	l.printf(PERS, "N%v RESTORE ENTS (LN:%v)", r.id, len(ents))
+	l.printEnts(PERS, r.id, ents)
 }
 
 func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 	for _, ent := range ents {
-		l.printf(topic, "N%v    (I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
+		// l.printf(topic, "N%v    (I:%v T:%v D:%v)", id, ent.Index, ent.Term, string(ent.Data))
+		l.printf(topic, "N%v    (I:%v T:%v)", id, ent.Index, ent.Term)
 	}
 }
 
@@ -321,5 +352,32 @@ func (l *Logger) printEnts(topic logTopic, id uint64, ents []pb.Entry) {
 
 func (l *Logger) ProcessedProp(propIndex uint64) {
 	r := l.r
-	l.printf(dPeer, "N%v PROCESSED PROP %v", r.id, propIndex)
+	l.printf(PEER, "N%v PROCESSED PROP %v", r.id, propIndex)
+}
+
+func (l *Logger) UpdateApplyState(oldAppliedIndex, newAppliedIndex uint64) {
+	r := l.r
+	l.printf(PERS, "N%v ^as (AI:%v) -> (AI:%v)", r.id, oldAppliedIndex, newAppliedIndex)
+}
+
+func (l *Logger) NewProposal(m *raft_cmdpb.RaftCmdRequest) {
+	r := l.r
+	for _, request := range m.Requests {
+		switch request.CmdType {
+		case raft_cmdpb.CmdType_Get:
+			l.printf(PEER, "N%v <- GET (K:%v)", r.id, string(request.Get.Key))
+
+		case raft_cmdpb.CmdType_Put:
+			l.printf(PEER, "N%v <- PUT (K:%v V:%v)", r.id, string(request.Put.Key), string(request.Put.Value))
+
+		case raft_cmdpb.CmdType_Delete:
+			l.printf(PEER, "N%v <- DEL (K:%v)", r.id, string(request.Delete.Key))
+
+		case raft_cmdpb.CmdType_Snap:
+			l.printf(PEER, "N%v <- SNP", r.id)
+
+		default:
+			panic("unknown cmd type")
+		}
+	}
 }

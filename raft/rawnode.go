@@ -72,13 +72,16 @@ type Ready struct {
 
 // RawNode is a wrapper of Raft.
 type RawNode struct {
-	Raft *Raft
+	Raft          *Raft
+	prevHardState pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(cfg *Config) (*RawNode, error) {
+	r := newRaft(cfg)
 	rn := &RawNode{
-		Raft: newRaft(cfg),
+		Raft:          r,
+		prevHardState: r.hardState(),
 	}
 	return rn, nil
 }
@@ -158,6 +161,10 @@ func (rn *RawNode) Ready() Ready {
 	if len(rd.Messages) == 0 {
 		rd.Messages = nil
 	}
+	if curHardState := rn.Raft.hardState(); !isHardStateEqual(curHardState, rn.prevHardState) {
+		rd.HardState = curHardState
+	}
+
 	// FIXME: Only populate the snapshot box when there's a pending snapshot?
 	// note, pb.Snapshot id a box and whenever you have a new snapshot,
 	// replace the content of the box with the new snapshot. So Snapshot
@@ -172,9 +179,13 @@ func (rn *RawNode) Ready() Ready {
 // (2) if there're newly appended entries to be stabled.
 // (3) if there're newly committed entries to be applied,
 // (4) if there're pending snapshot to be installed.
+// (5) if the hardstate needs to be updated.
 func (rn *RawNode) HasReady() bool {
 	l := rn.Raft.RaftLog
-	return len(rn.Raft.msgs) > 0 || len(l.unstableEntries()) > 0 || len(l.nextEnts()) > 0 || l.hasPendingSnapshot()
+	curHardState := rn.Raft.hardState()
+	updatedHardState := !IsEmptyHardState(curHardState) && !isHardStateEqual(curHardState, rn.prevHardState)
+	return len(rn.Raft.msgs) > 0 || len(l.unstableEntries()) > 0 ||
+		len(l.nextEnts()) > 0 || l.hasPendingSnapshot() || updatedHardState
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
@@ -196,6 +207,9 @@ func (rn *RawNode) Advance(rd Ready) {
 	if !IsEmptySnap(&rd.Snapshot) {
 		l.lastIncludedIndex = rd.Snapshot.Metadata.Index
 		l.lastIncludedTerm = rd.Snapshot.Metadata.Term
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardState = rd.HardState
 	}
 }
 

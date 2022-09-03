@@ -379,6 +379,15 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		ps.raftState.HardState = &ready.HardState
 	}
 
+	// persist the new RaftLocalState.
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+
+	// apply the batch of writes to raft db.
+	err := raftWB.WriteToDB(ps.Engines.Raft)
+	if err != nil {
+		return nil, err
+	}
+
 	// apply the new snapshot.
 	kvWB := new(engine_util.WriteBatch)
 	var applySnapResult *ApplySnapResult = nil
@@ -389,14 +398,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		}
 	}
 
-	// persist the new RaftLocalState.
-	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
-
-	// apply the batch of writes.
-	err := raftWB.WriteToDB(ps.Engines.Raft)
-	if err != nil {
-		return nil, err
-	}
+	// apply the batch of writes to kv db.
 	err = kvWB.WriteToDB(ps.Engines.Kv)
 	if err != nil {
 		return nil, err

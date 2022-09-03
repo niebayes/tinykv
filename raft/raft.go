@@ -128,22 +128,22 @@ func newRaft(c *Config) *Raft {
 	}
 
 	r := &Raft{
-		id:                  c.ID,
-		Term:                0,
-		Vote:                None,
-		RaftLog:             newLog(c.Storage),
-		Prs:                 make(map[uint64]*Progress),
-		State:               StateFollower,
-		votes:               make(map[uint64]bool),
-		msgs:                make([]pb.Message, 0),
-		Lead:                None,
+		id:      c.ID,
+		Term:    0,
+		Vote:    None,
+		RaftLog: newLog(c.Storage),
+		Prs:     make(map[uint64]*Progress),
+		State:   StateFollower,
+		votes:   make(map[uint64]bool),
+		msgs:    make([]pb.Message, 0),
+		Lead:    None,
 		// hint: adjust election time out to make the leader election faster and stable.
 		heartbeatTimeout:    c.HeartbeatTick,
 		electionTimeoutBase: c.ElectionTick,
 		// heartbeatTimeout:    2 * c.HeartbeatTick,
 		// electionTimeoutBase: 2 * c.ElectionTick,
-		heartbeatElapsed:    0,
-		electionElapsed:     0,
+		heartbeatElapsed: 0,
+		electionElapsed:  0,
 	}
 
 	// init logger.
@@ -256,7 +256,8 @@ func (r *Raft) stepFollower(msg pb.Message) {
 	case pb.MessageType_MsgBeat:
 		// dropped.
 	case pb.MessageType_MsgPropose:
-		r.handlePropose(msg)
+		// dropped.
+		// FIXME: Shall I redirect the proposal to the leader.
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(msg)
 	case pb.MessageType_MsgRequestVoteResponse:
@@ -269,6 +270,10 @@ func (r *Raft) stepFollower(msg pb.Message) {
 		r.handleAppendEntries(msg)
 	case pb.MessageType_MsgAppendResponse:
 		// dropped.
+	case pb.MessageType_MsgSnapshot:
+		// r.handleSnapshot(msg)
+	case pb.MessageType_MsgTimeoutNow:
+		//
 	default:
 		panic("invalid msg type")
 	}
@@ -295,6 +300,10 @@ func (r *Raft) stepCandidate(msg pb.Message) {
 		r.handleAppendEntries(msg)
 	case pb.MessageType_MsgAppendResponse:
 		// dropped.
+	case pb.MessageType_MsgSnapshot:
+		// r.handleSnapshot(msg)
+	case pb.MessageType_MsgTimeoutNow:
+		//
 	default:
 		panic("invalid msg type")
 	}
@@ -321,6 +330,10 @@ func (r *Raft) stepLeader(msg pb.Message) {
 		r.handleAppendEntries(msg)
 	case pb.MessageType_MsgAppendResponse:
 		r.handleAppendEntriesResponse(msg)
+	case pb.MessageType_MsgSnapshot:
+		// r.handleSnapshot(msg)
+	case pb.MessageType_MsgTimeoutNow:
+		//
 	default:
 		panic("invalid msg type")
 	}
@@ -333,4 +346,12 @@ func (r *Raft) stepLeader(msg pb.Message) {
 // forward the message msg to the upper application which is responsible for sending out the message.
 func (r *Raft) forwardMsgUp(msg pb.Message) {
 	r.msgs = append(r.msgs, msg)
+}
+
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term: r.Term, 
+		Vote: r.Vote, 
+		Commit: r.RaftLog.committed,
+	}
 }
