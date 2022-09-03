@@ -13,7 +13,7 @@ import (
 )
 
 // true to turn on debugging/logging.
-const debug = true
+const debug = false
 const LOGTOFILE = false
 
 // what topic the log message is related to.
@@ -205,9 +205,15 @@ func (l *Logger) voteTo(to uint64) {
 	l.printf(ELEC, "N%v v-> N%v", r.id, to)
 }
 
-func (l *Logger) rejectVoteTo(to uint64) {
+var denyReasonMap = [...]string{
+	"GRT", // grant the vote.
+	"VTD", // I've granted the vote to another one.
+	"STL", // you're stale.
+}
+
+func (l *Logger) rejectVoteTo(to uint64, reason pb.DenyVoteReason) {
 	r := l.r
-	l.printf(ELEC, "N%v !v-> N%v", r.id, to)
+	l.printf(ELEC, "N%v !v-> N%v COZ %v", r.id, to, denyReasonMap[reason])
 }
 
 func (l *Logger) recvRVOTRes(m pb.Message) {
@@ -298,6 +304,11 @@ func (l *Logger) updateProgOf(id, oldNext, oldMatch, newNext, newMatch uint64) {
 	l.printf(LRPE, "N%v ^pr N%v (NI:%v MI:%v) -> (NI:%v MI:%v)", r.id, id, oldNext, oldMatch, newNext, newMatch)
 }
 
+func (l *Logger) recvAppendQuorum(cnt int) {
+	r := l.r
+	l.printf(ELEC, "N%v <- APED QUORUM (T:%v NA:%v NN:%v)", r.id, cnt, len(r.Prs))
+}
+
 func (l *Logger) updateCommitted(oldCommitted uint64) {
 	r := l.r
 	l.printf(LRPE, "N%v ^ci (CI:%v) -> (CI:%v)", r.id, oldCommitted, r.RaftLog.committed)
@@ -364,15 +375,15 @@ func (l *Logger) restoreConfState(confState *pb.ConfState) {
 	l.printf(PERS, "N%v +cs (NN:%v)", r.id, len(confState.Nodes))
 }
 
-func (l *Logger) PersistEnts(lastStabledIndex uint64) {
+func (l *Logger) PersistEnts(oldlastStabledIndex, lastStabledIndex uint64) {
 	r := l.r
 	// be: backup entries.
-	l.printf(PERS, "N%v be (SI:%v)", r.id, lastStabledIndex)
+	l.printf(PERS, "N%v be (SI:%v) -> (SI:%v)", r.id, oldlastStabledIndex, lastStabledIndex)
 }
 
-func (l *Logger) UpdateHardState(curHardState pb.HardState) {
+func (l *Logger) UpdateHardState(prevHardState pb.HardState) {
 	r := l.r
-	prevHardState := r.hardState()
+	curHardState := r.hardState()
 	l.printf(PERS, "N%v ^hs (T:%v V:%v CI:%v) -> (T:%v V:%v CI:%v)", r.id, prevHardState.Term,
 		prevHardState.Vote, prevHardState.Commit, curHardState.Term, curHardState.Vote, curHardState.Commit)
 }

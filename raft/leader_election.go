@@ -113,13 +113,13 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		r.becomeFollower(m.Term, None)
 	}
 
-	reject := !r.checkVoteRestriction(m)
+	reject, reason := r.checkVoteRestriction(m)
 
 	if !reject {
 		r.Vote = m.From
 		r.Logger.voteTo(m.From)
 	} else {
-		r.Logger.rejectVoteTo(m.From)
+		r.Logger.rejectVoteTo(m.From, reason)
 	}
 
 	// reset election timer since I've granted the vote and this may result in spawning a new leader.
@@ -186,7 +186,6 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 func (r *Raft) becomeLeader() {
 	r.Logger.stateToLeader()
 
-	r.resetVoteRecord()
 	r.resetPeerProgress()
 	r.State = StateLeader
 	r.Lead = r.id
@@ -222,7 +221,8 @@ func (r *Raft) resetElectionTimer() {
 	r.electionTimeout = r.electionTimeoutBase + rand.Intn(r.electionTimeoutBase)
 }
 
-func (r *Raft) checkVoteRestriction(m pb.Message) bool {
+// return true if able to grant the vote, false otherwise.
+func (r *Raft) checkVoteRestriction(m pb.Message) (bool, pb.DenyVoteReason) {
 	if r.Vote == None || r.Vote == m.From {
 		// further restriction:
 		// only grant the vote iff the candidate's log is at least as up-to-date as my log.
@@ -234,9 +234,15 @@ func (r *Raft) checkVoteRestriction(m pb.Message) bool {
 		l := r.RaftLog
 		li := l.LastIndex()
 		lt, _ := l.Term(li)
-		return (lastLogTerm > lt) || (lastLogTerm == lt && lastLogIndex >= li)
+
+		// ok = true if the candidate has more up-to-date log than me.
+		ok := (lastLogTerm > lt) || (lastLogTerm == lt && lastLogIndex >= li)
+		if !ok {
+			return true, pb.DenyVoteReason_STALE
+		}
+		return false, pb.DenyVoteReason_GRANT
 	}
-	return false
+	return true, pb.DenyVoteReason_VOTED
 }
 
 // reset progress of each peer except this node itself.
@@ -246,7 +252,7 @@ func (r *Raft) resetPeerProgress() {
 	for _, pr := range r.Prs {
 		pr.Next = l.LastIndex() + 1
 		// FIXME: Shall I adjust Match to raft init log index?
-		pr.Match = 0
+		pr.Match = r.raftInitLogIndex
 	}
 }
 

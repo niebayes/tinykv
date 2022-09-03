@@ -76,6 +76,14 @@ enum RejectReason {
     TermConflict = 2;
 }
 
+enum DenyVoteReason {
+    GRANT = 0;
+    // I've voted for another one in this term.
+    VOTED = 1;
+    // My log is more update to date than you.
+    STALE = 2;
+}
+
 message Message {
     MessageType msg_type = 1;
     uint64 to = 2;
@@ -90,8 +98,9 @@ message Message {
     // in log replication: true if from node has rejected to append entries.
     bool reject = 10;
     RejectReason reason = 11;
-    uint64 next_index = 12;
-    uint64 conflict_term = 13;
+    DenyVoteReason deny_reason = 12;
+    uint64 next_index = 13;
+    uint64 conflict_term = 14;
 }
 
 // HardState contains the state of a node need to be peristed, including the current term, commit index 

@@ -118,6 +118,8 @@ type Raft struct {
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
 
+	raftInitLogIndex uint64
+
 	Logger *Logger
 }
 
@@ -159,7 +161,7 @@ func newRaft(c *Config) *Raft {
 
 	// check if there're some restored stable entries.
 	l := r.RaftLog
-	if l.stabled != 0 {
+	if l.stabled != 0 && l.Len() > 1 {
 		r.Logger.restoreEnts(l.allEntries())
 	}
 
@@ -167,6 +169,8 @@ func newRaft(c *Config) *Raft {
 	hardstate, confState, _ := c.Storage.InitialState()
 	r.restoreHardState(&hardstate)
 	r.restoreConfState(&confState)
+
+	r.raftInitLogIndex = hardstate.Commit
 
 	// TODO: restore persisted log from snapshot.
 
@@ -320,7 +324,7 @@ func (r *Raft) stepLeader(msg pb.Message) {
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(msg)
 	case pb.MessageType_MsgRequestVoteResponse:
-		r.handleRequestVoteResponse(msg)
+		// dropped.
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(msg)
 	case pb.MessageType_MsgHeartbeatResponse:

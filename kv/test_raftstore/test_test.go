@@ -197,7 +197,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
-		// spawn a set of clients which sending raft cmds to leader. 
+		// spawn a set of clients which sending raft cmds to leader.
 		// wait until all sending tasks are done.
 		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
 			// record how many times of MustPut was called before termination.
@@ -205,7 +205,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			defer func() {
 				clnts[cli] <- j
 			}()
-			// call MustPut and Scan interchangably, and check if this Scan corresponds 
+			// call MustPut and Scan interchangably, and check if this Scan corresponds
 			// to the result of the last MustPut.
 			last := ""
 			// loop until done_clients is set to non-zero.
@@ -365,12 +365,16 @@ func TestOnePartition2B(t *testing.T) {
 
 	region := cluster.GetRegion([]byte(""))
 	leader := cluster.LeaderOfRegion(region.GetId())
+
+	// init, leader is in s1, the majority.
 	s1 := []uint64{leader.GetStoreId()}
 	s2 := []uint64{}
 	for _, p := range region.GetPeers() {
 		if p.GetId() == leader.GetId() {
 			continue
 		}
+		// 3 peers in s1, majority
+		// 2 peers in s2, minority
 		if len(s1) < 3 {
 			s1 = append(s1, p.GetStoreId())
 		} else {
@@ -378,31 +382,55 @@ func TestOnePartition2B(t *testing.T) {
 		}
 	}
 
-	// leader in majority, partition doesn't affect write/read
+	l := makeLogger(false, "")
+	l.NewConf(s1, s2)
+
+	// block all transport between s1 and s2.
 	cluster.AddFilter(&PartitionFilter{
 		s1: s1,
 		s2: s2,
 	})
+
+	l.AddFilter()
+
+	// leader in majority, partition doesn't affect write/read
+	// send Put requests to majority s1, must succeed.
 	cluster.MustPut([]byte("k1"), []byte("v1"))
 	cluster.MustGet([]byte("k1"), []byte("v1"))
+	// since s2 is filtered from s1, the put would not affect s2.
 	MustGetNone(cluster.engines[s2[0]], []byte("k1"))
 	MustGetNone(cluster.engines[s2[1]], []byte("k1"))
-	cluster.ClearFilters()
 
-	// old leader in minority, new leader should be elected
+	// remove the filter.
+	cluster.ClearFilters()
+	l.ClearFilter()
+
+	// now s2 becomes the majority, a new leader shall be elected.
 	s2 = append(s2, s1[2])
+	// s1 becomes the minority.
 	s1 = s1[:2]
+
+	l.NewConf(s1, s2)
+
+	// block all transport between s1 and s2.
 	cluster.AddFilter(&PartitionFilter{
 		s1: s1,
 		s2: s2,
 	})
+	l.AddFilter()
+
+	// items are changed in the majority.
 	cluster.MustGet([]byte("k1"), []byte("v1"))
 	cluster.MustPut([]byte("k1"), []byte("changed"))
+
+	// but not changed in the minority.
 	MustGetEqual(cluster.engines[s1[0]], []byte("k1"), []byte("v1"))
 	MustGetEqual(cluster.engines[s1[1]], []byte("k1"), []byte("v1"))
 	cluster.ClearFilters()
+	l.ClearFilter()
 
 	// when partition heals, old leader should sync data
+	// now, items must also be changed in the minority.
 	cluster.MustPut([]byte("k2"), []byte("v2"))
 	MustGetEqual(cluster.engines[s1[0]], []byte("k2"), []byte("v2"))
 	MustGetEqual(cluster.engines[s1[0]], []byte("k1"), []byte("changed"))

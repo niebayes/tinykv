@@ -154,8 +154,35 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	rn.Advance(rd)
 }
 
+func (d *peerMsgHandler) updateApplyState(index uint64, kvWB *engine_util.WriteBatch) {
+	// advance and persist apply index.
+	applyState := d.peerStorage.applyState
+	applyState.AppliedIndex = max(applyState.AppliedIndex, index)
+	kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+}
+
+// since a no-op entry has no data, we only needs to advance the applied index.
+func (d *peerMsgHandler) processNoopEntry(ent eraftpb.Entry) {
+	kvWB := new(engine_util.WriteBatch)
+	applyState := d.peerStorage.applyState
+	oldAppliedIndex := applyState.AppliedIndex
+	d.updateApplyState(ent.Index, kvWB)
+	err := kvWB.WriteToDB(d.ctx.engine.Kv)
+	if err != nil {
+		panic(err)
+	}
+	if oldAppliedIndex != applyState.AppliedIndex {
+		d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
+	}
+}
+
 // process a log entry.
 func (d *peerMsgHandler) process(ent eraftpb.Entry) {
+	if len(ent.Data) == 0 {
+		d.processNoopEntry(ent)
+		return
+	}
+
 	cmd := &raft_cmdpb.RaftCmdRequest{}
 	err := proto.Unmarshal(ent.Data, cmd)
 	if err != nil {
@@ -189,10 +216,7 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 			}
 
 			// advance and persist apply index.
-			applyState := d.peerStorage.applyState
-			oldAppliedIndex := applyState.AppliedIndex
-			applyState.AppliedIndex = max(applyState.AppliedIndex, ent.Index)
-			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+			d.updateApplyState(ent.Index, kvWB)
 
 			// FIXME: Is is checking reasonable?
 			if d.stopped {
@@ -205,12 +229,8 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 				panic(err)
 			}
 
-			d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
-
-			// notify the client if this entry is not a no-op entry,
-			// since it's a client cannot issue a no-op entry.
-			// only the leader is responsible for notifying the clients.
-			if len(ent.Data) > 0 && d.IsLeader() {
+			// notify the client.
+			if d.IsLeader() {
 				d.RaftGroup.Raft.Logger.ProcessedProp(p.index)
 				p.cb.Done(cmd_resp)
 			}

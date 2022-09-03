@@ -230,8 +230,6 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		// to ensure the next index does not go below 1.
 		pr.Next = max(pr.Next, 1)
 
-		// TODO: immediately send AppendEntries RPC to the peer.
-
 	} else {
 		// pr.Next = max(pr.Next, m.Index+1) // the test suites are creepy.
 		pr.Next = max(pr.Next, m.NextIndex)
@@ -444,6 +442,7 @@ func (r *Raft) checkQuorumAppend(index uint64) bool {
 			}
 		}
 	}
+	r.Logger.recvAppendQuorum(cnt)
 	return 2*cnt > len(r.Prs)
 }
 

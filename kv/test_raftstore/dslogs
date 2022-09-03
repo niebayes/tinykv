@@ -13,15 +13,12 @@ from rich.traceback import install
 # Mapping from topics to colors
 TOPICS = {
     "ELEC": "#4878bc",
-    "VOTE": "#67a0b2",
-    "CLNT": "#00813c",
     "LRPE": "#ff615c",
-    "CMIT": "#98719f",
-    "RPCC": "#398280",
-    "REJC": "#ffffff",
-    "TIMR": "#9a9a99",
+    "BEAT": "#00813c",
+    "PEER": "#00813c",
     "PERS": "#d08341",
     "SNAP": "#FD971F",
+    "TEST": "#98719F",
 }
 # fmt: on
 
