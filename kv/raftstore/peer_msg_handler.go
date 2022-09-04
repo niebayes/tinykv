@@ -234,6 +234,11 @@ func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCm
 
 		} else if p.index == ent.Index && p.term == ent.Term {
 			// notify the client.
+			// note, although a raft cmd may contain multiple requests, but there cannot be multiple 
+			// snap requests in one raft cmd. This is because a snap request is only issued when the Reader 
+			// interface is called on the Storage interface. And one Reader call only issue a single 
+			// snap request, and no more other requests. 
+			// so we only need to bind the new txn on the raft cmd, rather than on each snap request.
 			if needNewTxn {
 				p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
 			}
