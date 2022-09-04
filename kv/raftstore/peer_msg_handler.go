@@ -175,17 +175,17 @@ func (d *peerMsgHandler) processNoopEntry(ent eraftpb.Entry) {
 	if oldAppliedIndex != applyState.AppliedIndex {
 		d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
 	}
+	d.RaftGroup.Raft.Logger.ProcessedPropNoop(ent.Index)
 }
 
-func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest, p *proposal) *raft_cmdpb.RaftCmdResponse {
+func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) (*raft_cmdpb.RaftCmdResponse, bool) {
 	kvWB := new(engine_util.WriteBatch)
 	cmd_resp := newCmdResp()
 
-	// only handle requests if it's not a no-op entry,
-	// since a no-op entry is appended by the raft module itself.
-	if len(ent.Data) > 0 {
-		for _, request := range cmd.Requests {
-			d.handleRequest(request, cmd_resp, kvWB, p)
+	needNewTxn := false
+	for _, request := range cmd.Requests {
+		if d.handleRequest(request, cmd_resp, kvWB) {
+			needNewTxn = true
 		}
 	}
 
@@ -207,14 +207,20 @@ func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.R
 
 	d.RaftGroup.Raft.Logger.ProcessedProp(ent.Index)
 
-	return cmd_resp
+	return cmd_resp, needNewTxn
 }
 
 func (d *peerMsgHandler) processNonLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) {
-	d.processRaftCommand(ent, cmd, nil)
+	d.processRaftCommand(ent, cmd)
 }
 
 func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) {
+	// if this raft cmd contains at least one snap request, then we need to new a txn.
+	// FIXME: Shall I need to cache the response? Or else, what if there's no corresponding 
+	// proposal found for this raft cmd right now, and then the proposal is resent us and it will 
+	// be executed twice?
+	cmd_resp, needNewTxn := d.processRaftCommand(ent, cmd)
+
 	// find the corresponding proposal of this log entry.
 	stale_index := 0 // the start index of the proposals array after processing.
 	update := false  // do I need to update proposal array?
@@ -227,10 +233,10 @@ func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCm
 			update = true
 
 		} else if p.index == ent.Index && p.term == ent.Term {
-
-			cmd_resp := d.processRaftCommand(ent, cmd, p)
-
 			// notify the client.
+			if needNewTxn {
+				p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+			}
 			p.cb.Done(cmd_resp)
 			d.RaftGroup.Raft.Logger.NotifyClient(p.index)
 
@@ -263,8 +269,7 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 	cmd := &raft_cmdpb.RaftCmdRequest{}
 	err := proto.Unmarshal(ent.Data, cmd)
 	if err != nil {
-		log.Fatalf(err.Error())
-		return
+		panic(err)
 	}
 
 	// leader and non-leaders has different behaviors on processing a raft cmd.
@@ -275,7 +280,8 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 	}
 }
 
-func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch, p *proposal) {
+func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) bool {
+	needNewTxn := false
 	switch request.CmdType {
 	case raft_cmdpb.CmdType_Get:
 		resp := d.handleGetRequest(request)
@@ -304,16 +310,21 @@ func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *ra
 		// log.Infof("N%v processed Delete request: key %v \n", d.PeerId(), string(request.Delete.Key))
 
 	case raft_cmdpb.CmdType_Snap:
-		resp := d.handleSnapRequest(request, p)
+		resp := d.handleSnapRequest(request)
 		cmd_resp.Responses = append(cmd_resp.Responses, &raft_cmdpb.Response{
 			CmdType: raft_cmdpb.CmdType_Snap,
 			Snap:    resp,
 		})
+		// TODO: wrap these to a hint.
+		// when a client wishes to read the kv, the storage returns it a snapshot which is wrapped into
+		// a txn. So, we start a new txn here, and let the service handler discards the txn.
+		needNewTxn = true
 		// log.Infof("N%v processed Snap request \n", d.PeerId())
 
 	default:
 		panic("unknown cmd type")
 	}
+	return needNewTxn
 }
 
 func (d *peerMsgHandler) handleGetRequest(request *raft_cmdpb.Request) *raft_cmdpb.GetResponse {
@@ -337,15 +348,9 @@ func (d *peerMsgHandler) handleDeleteRequest(request *raft_cmdpb.Request, kvWB *
 	return response
 }
 
-func (d *peerMsgHandler) handleSnapRequest(request *raft_cmdpb.Request, p *proposal) *raft_cmdpb.SnapResponse {
+func (d *peerMsgHandler) handleSnapRequest(request *raft_cmdpb.Request) *raft_cmdpb.SnapResponse {
 	response := &raft_cmdpb.SnapResponse{
 		Region: d.Region(),
-	}
-	// TODO: wrap these to a hint.
-	// when a client wishes to read the kv, the storage returns it a snapshot which is wrapped into
-	// a txn. So, we start a new txn here, and let the service handler discards the txn.
-	if p != nil {
-		p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
 	}
 	return response
 }

@@ -115,3 +115,15 @@ func (l *Logger) AddFilter() {
 func (l *Logger) ClearFilter() {
 	l.printf(TEST, "REM FILTER")
 }
+
+//
+// persistence events
+//
+
+func (l *Logger) StopServer(id int) {
+	l.printf(TEST, "N%v STOP", id)
+}
+
+func (l *Logger) RestartServer(id int) {
+	l.printf(TEST, "N%v RESTART", id)
+}

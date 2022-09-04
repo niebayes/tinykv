@@ -77,6 +77,7 @@ const (
 	// peer handling events:
 	//	start raft module
 	//  propose new raft cmd
+	//  detect ready raft states.
 	//  notify clients stale proposals.
 	//  process committed log entry/raft cmd
 	//  advance raft state
@@ -255,7 +256,7 @@ func (l *Logger) recvPROP(m pb.Message) {
 func (l *Logger) appendEnts(ents []pb.Entry) {
 	r := l.r
 	l.printf(LRPE, "N%v +e (LN:%v)", r.id, len(ents))
-	l.printEnts(LRPE, r.id, ents)
+	// l.printEnts(LRPE, r.id, ents)
 }
 
 func (l *Logger) bcastAENT() {
@@ -266,7 +267,7 @@ func (l *Logger) bcastAENT() {
 func (l *Logger) sendEnts(prevLogIndex, prevLogTerm uint64, ents []pb.Entry, to uint64) {
 	r := l.r
 	l.printf(LRPE, "N%v e-> N%v (T:%v CI:%v PI:%v PT:%v LN:%v)", r.id, to, r.Term, r.RaftLog.committed, prevLogIndex, prevLogTerm, len(ents))
-	l.printEnts(LRPE, r.id, ents)
+	// l.printEnts(LRPE, r.id, ents)
 }
 
 func (l *Logger) recvAENT(m pb.Message) {
@@ -432,6 +433,12 @@ func (l *Logger) NewProposal(m *raft_cmdpb.RaftCmdRequest, propIndex, propTerm u
 	}
 }
 
+func (l *Logger) ReadyCommittedEnts(ents []pb.Entry) {
+	r := l.r
+	l.printf(PEER, "N%v RD CMT ENTS (LN:%v)", r.id, len(ents))
+	l.printEnts(PEER, r.id, ents)
+}
+
 func (l *Logger) NotifyStaleProp(propIndex, propTerm, entIndex, entTerm uint64) {
 	r := l.r
 	l.printf(PEER, "N%v STALE PROP (PI:%v PT:%v I%v: T:%v)", r.id, propIndex, propTerm, entIndex, entTerm)
@@ -440,6 +447,11 @@ func (l *Logger) NotifyStaleProp(propIndex, propTerm, entIndex, entTerm uint64) 
 func (l *Logger) NotifyClient(propIndex uint64) {
 	r := l.r
 	l.printf(PEER, "N%v NOTIFY PROP %v", r.id, propIndex)
+}
+
+func (l *Logger) ProcessedPropNoop(propIndex uint64) {
+	r := l.r
+	l.printf(PEER, "N%v PROC PROP NOOP %v", r.id, propIndex)
 }
 
 func (l *Logger) ProcessedProp(propIndex uint64) {

@@ -20,6 +20,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+var logger *Logger = makeLogger(false, "")
+
 // a client runs the function f and then signals it is done
 func runClient(t *testing.T, me int, ca chan bool, fn func(me int, t *testing.T)) {
 	ok := false
@@ -101,15 +103,20 @@ func networkchaos(t *testing.T, cluster *Cluster, ch chan bool, done *int32, unr
 				}
 			}
 			cluster.ClearFilters()
-			log.Infof("partition: %v, %v", pa[0], pa[1])
+			logger.ClearFilter()
+
+			// log.Infof("partition: %v, %v", pa[0], pa[1])
 			cluster.AddFilter(&PartitionFilter{
 				s1: pa[0],
 				s2: pa[1],
 			})
+			logger.NewConf(pa[0], pa[1])
+			logger.AddFilter()
 		}
 
 		if unreliable {
 			cluster.AddFilter(&DropFilter{})
+			logger.AddFilter()
 		}
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
 	}
@@ -253,6 +260,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			// won't return until that server discovers a new term
 			// has started.
 			cluster.ClearFilters()
+			logger.ClearFilter()
 			// wait for a while so that we have a new term
 			time.Sleep(electionTimeout)
 		}
@@ -261,17 +269,19 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		<-ch_clients
 
 		if crash {
-			log.Warnf("shutdown servers\n")
+			// log.Warnf("shutdown servers\n")
 			for i := 1; i <= nservers; i++ {
 				cluster.StopServer(uint64(i))
+				logger.StopServer(i)
 			}
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
-			log.Warnf("restart servers\n")
+			// log.Warnf("restart servers\n")
 			// crash and re-start all
 			for i := 1; i <= nservers; i++ {
 				cluster.StartServer(uint64(i))
+				logger.RestartServer(i)
 			}
 		}
 

@@ -165,6 +165,8 @@ func (rn *RawNode) Ready() Ready {
 		rd.HardState = curHardState
 	}
 
+	rn.Raft.Logger.ReadyCommittedEnts(rd.CommittedEntries)
+
 	// FIXME: Only populate the snapshot box when there's a pending snapshot?
 	// note, pb.Snapshot id a box and whenever you have a new snapshot,
 	// replace the content of the box with the new snapshot. So Snapshot
