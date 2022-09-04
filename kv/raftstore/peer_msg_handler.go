@@ -21,6 +21,8 @@ import (
 	"github.com/pingcap/errors"
 )
 
+var logger *Logger = makeLogger(false, "")
+
 type PeerTick int
 
 const (
@@ -112,6 +114,14 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 
 // HandleRaftReady should get the ready from Raft module and do corresponding actions like
 // persisting log entries, applying committed entries and sending raft messages to other peers through the network.
+// TODO: Add raft invariant checker after each change.
+// 	for e.g. applied index must increase continuously.
+//					 commit index >= applied index
+//					 commit index <= stabled index
+//					 valid state transitions: i.e. only in certain scenarios, could a server change from one state to another.
+//					 cannot discard committed entries.
+//					 executed log entry must have index > applied index, i.e. cannot execute one stale entry.
+// TODO: Add safety checker for each safety property described in raft paper.
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
@@ -178,18 +188,62 @@ func (d *peerMsgHandler) processNoopEntry(ent eraftpb.Entry) {
 	d.RaftGroup.Raft.Logger.ProcessedPropNoop(ent.Index)
 }
 
+func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest, kvWB *engine_util.WriteBatch) {
+	// update truncated state.
+	applyState := d.peerStorage.applyState
+	if applyState.TruncatedState.Index < request.CompactIndex {
+		applyState.TruncatedState.Index = request.CompactIndex
+		applyState.TruncatedState.Term = request.CompactTerm
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+
+		d.ScheduleCompactLog(applyState.TruncatedState.Index)
+		logger.ScheduleCompactLog(d.PeerId(), applyState.TruncatedState.Index, applyState.TruncatedState.Term)
+	}
+}
+
+func (d *peerMsgHandler) handleChangePeer(request *raft_cmdpb.ChangePeerRequest) {
+}
+
+func (d *peerMsgHandler) handleTransferLeader(request *raft_cmdpb.TransferLeaderRequest) {
+}
+
+func (d *peerMsgHandler) handleSplit(request *raft_cmdpb.SplitRequest) {
+}
+
+func (d *peerMsgHandler) handleAdminRequest(request *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
+	switch request.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		d.handleCompactLog(request.CompactLog, kvWB)
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		d.handleChangePeer(request.ChangePeer)
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		d.handleTransferLeader(request.TransferLeader)
+	case raft_cmdpb.AdminCmdType_Split:
+		d.handleSplit(request.Split)
+	default:
+		panic("invalid admin request type")
+	}
+}
+
 func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) (*raft_cmdpb.RaftCmdResponse, bool) {
 	kvWB := new(engine_util.WriteBatch)
 	cmd_resp := newCmdResp()
 
 	needNewTxn := false
 	for _, request := range cmd.Requests {
-		if d.handleRequest(request, cmd_resp, kvWB) {
+		if d.handleClientRequest(request, cmd_resp, kvWB) {
 			needNewTxn = true
 		}
 	}
 
 	applyState := d.peerStorage.applyState
+	oldTruncatedIndex := applyState.TruncatedState.Index
+	oldTruncatedTerm := applyState.TruncatedState.Term
+
+	if cmd.AdminRequest != nil {
+		d.handleAdminRequest(cmd.AdminRequest, kvWB)
+	}
+
 	oldAppliedIndex := applyState.AppliedIndex
 
 	// advance and persist apply index.
@@ -201,6 +255,12 @@ func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.R
 		panic(err)
 	}
 
+	if oldTruncatedIndex != applyState.TruncatedState.Index {
+		logger.UpdateTruncatedState(d.PeerId(), oldTruncatedIndex, oldTruncatedTerm,
+			applyState.TruncatedState.Index, applyState.TruncatedState.Term)
+	}
+
+	// TODO: replace raft.logger with my logger.
 	if oldAppliedIndex != applyState.AppliedIndex {
 		d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
 	}
@@ -249,9 +309,12 @@ func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCm
 	update := false  // do I need to update proposal array?
 	for i := 0; !d.stopped && i < len(d.proposals); i++ {
 		p := d.proposals[i]
+		// FIXME: Is my stale check incorrect?
 		if p.index < ent.Index || p.term < ent.Term {
-			NotifyStaleReq(d.Term(), p.cb)
-			d.RaftGroup.Raft.Logger.NotifyStaleProp(p.index, p.term, ent.Index, ent.Term)
+			if p.cb != nil {
+				NotifyStaleReq(d.Term(), p.cb)
+				d.RaftGroup.Raft.Logger.NotifyStaleProp(p.index, p.term, ent.Index, ent.Term)
+			}
 			stale_index = i
 			update = true
 
@@ -262,11 +325,13 @@ func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCm
 			// interface is called on the Storage interface. And one Reader call only issue a single
 			// snap request, and no more other requests.
 			// so we only need to bind the new txn on the raft cmd, rather than on each snap request.
-			if needNewTxn {
-				p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+			if p.cb != nil {
+				if needNewTxn {
+					p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
+				}
+				p.cb.Done(cmd_resp)
+				d.RaftGroup.Raft.Logger.NotifyClient(p.index)
 			}
-			p.cb.Done(cmd_resp)
-			d.RaftGroup.Raft.Logger.NotifyClient(p.index)
 
 			// this cmd was processed and hence it's also marked staled.
 			stale_index = i
@@ -308,7 +373,7 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 	}
 }
 
-func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) bool {
+func (d *peerMsgHandler) handleClientRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) bool {
 	needNewTxn := false
 	switch request.CmdType {
 	case raft_cmdpb.CmdType_Get:

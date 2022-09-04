@@ -19,6 +19,7 @@ type logTopic string
 
 const (
 	PEER logTopic = "PEER"
+	SNAP logTopic = "SNAP"
 )
 
 type Logger struct {
@@ -106,4 +107,12 @@ func getVerbosityLevel() int {
 
 func (l *Logger) GetResponse(peerId, propIndex uint64, key []byte, val []byte) {
 	l.printf(PEER, "N%v GET PROP %v RESP (K:%v V:%v)", peerId, propIndex, string(key), string(val))
+}
+
+func (l *Logger) ScheduleCompactLog(peerId, truncatedIndex, truncatedTerm uint64) {
+	l.printf(SNAP, "N%v SCHED (TI:%v TT:%v)", peerId, truncatedIndex, truncatedTerm)
+}
+
+func (l *Logger) UpdateTruncatedState(peerId, oldTruncatedIndex, oldTruncatedTerm, truncatedIndex, truncatedTerm uint64) {
+	l.printf(SNAP, "N%v ^ts (TI:%v TT:%v) -> (TI:%v TT:%v)", peerId, oldTruncatedIndex, oldTruncatedTerm, truncatedIndex, truncatedTerm)
 }

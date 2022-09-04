@@ -278,7 +278,7 @@ func (r *Raft) stepFollower(msg pb.Message) {
 	case pb.MessageType_MsgAppendResponse:
 		// dropped.
 	case pb.MessageType_MsgSnapshot:
-		// r.handleSnapshot(msg)
+		r.handleInstallSnapshot(msg)
 	case pb.MessageType_MsgTimeoutNow:
 		//
 	default:
@@ -308,7 +308,7 @@ func (r *Raft) stepCandidate(msg pb.Message) {
 	case pb.MessageType_MsgAppendResponse:
 		// dropped.
 	case pb.MessageType_MsgSnapshot:
-		// r.handleSnapshot(msg)
+		r.handleSnapshot(msg)
 	case pb.MessageType_MsgTimeoutNow:
 		//
 	default:

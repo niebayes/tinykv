@@ -84,6 +84,9 @@ const (
 	PEER logTopic = "PEER"
 
 	// snapshotting events:
+	// TODO: add document for log compaction and snapshotting.
+	// the typical route of snapshotting is:
+	//
 	// service sends a snapshot
 	// server snapshots
 	// leader detects a follower is lagging hebind
@@ -476,3 +479,34 @@ func (l *Logger) AdvanceRaft(oldStabled, oldApplied, oldLastIncludedIndex,
 
 // func (l *Logger) UpdateProposals(oldProposals, newProposals []*peer.proposal) {
 // }
+
+//
+// snapshot events
+//
+
+func (l *Logger) sendSnap(to uint64, snap *pb.Snapshot) {
+	r := l.r
+	// TODO: add logging for confstate.
+	l.printf(SNAP, "N%v s-> N%v (SI:%v ST:%v)", r.id, to, snap.Metadata.Index, snap.Metadata.Term)
+}
+
+func (l *Logger) recvSNAP(m pb.Message) {
+	r := l.r
+	// TODO: add logging for confstate.
+	l.printf(SNAP, "N%v <- N%v SNAP (SI:%v ST:%v)", r.id, m.From, m.Snapshot.Metadata.Index, m.Snapshot.Metadata.Term)
+}
+
+func (l *Logger) entsAfterSnapshot() {
+	r := l.r
+	// snapshot entries.
+	l.printf(SNAP, "N%v ^se (LN:%v)", r.id, len(r.RaftLog.entries))
+	l.printEnts(SNAP, r.id, r.RaftLog.entries)
+}
+
+func (l *Logger) logStateAfterSnapshot(oldCommitted, oldStabled, oldApplied, oldLastIncludedIndex, oldLastIncludedTerm uint64) {
+	r := l.r
+	// snapshot log.
+	l.printf(SNAP, "N%v ^sl (AI:%v CI:%v SI:%v LI:%v LT:%v) -> (AI:%v CI:%v SI:%v LI:%v LT:%v)", r.id, oldApplied, oldCommitted,
+		oldStabled, oldLastIncludedIndex, oldLastIncludedTerm, r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled,
+		r.RaftLog.lastIncludedIndex, r.RaftLog.lastIncludedTerm)
+}

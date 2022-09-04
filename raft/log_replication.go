@@ -480,6 +480,12 @@ func (r *Raft) sendAppendEntries(to uint64, must bool) {
 		prevLogTerm = prevLog.Term
 	}
 
+	// entries to be sent were compacted, send snapshot instead.
+	if prevLogIndex < l.lastIncludedIndex {
+		r.sendInstallSnapshot(to)
+		return
+	}
+
 	// entries to be sent.
 	ents := l.sliceStartAt(pr.Next)
 	if len(ents) == 0 && !must {

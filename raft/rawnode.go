@@ -156,6 +156,7 @@ func (rn *RawNode) Ready() Ready {
 	rd.CommittedEntries = l.nextEnts()
 	rd.Messages = rn.Raft.msgs
 	// be sure to empty the mailbox after retrieving.
+	// FIXME: Shall I empty the mailbox right here, or in Advance after the ready state are processed?
 	rn.Raft.msgs = rn.Raft.msgs[:0]
 	// to fit into the creepy tests.
 	if len(rd.Messages) == 0 {
@@ -164,15 +165,13 @@ func (rn *RawNode) Ready() Ready {
 	if curHardState := rn.Raft.hardState(); !isHardStateEqual(curHardState, rn.prevHardState) {
 		rd.HardState = curHardState
 	}
+	if l.hasPendingSnapshot() {
+		// FIXME: Shall nullify pendingSnapshot right now?
+		rd.Snapshot = *l.pendingSnapshot
+	}
 
-	rn.Raft.Logger.ReadyCommittedEnts(rd.CommittedEntries)
+	// rn.Raft.Logger.ReadyCommittedEnts(rd.CommittedEntries)
 
-	// FIXME: Only populate the snapshot box when there's a pending snapshot?
-	// note, pb.Snapshot id a box and whenever you have a new snapshot,
-	// replace the content of the box with the new snapshot. So Snapshot
-	// always return a nil error.
-	// snapshot, _ := l.storage.Snapshot()
-	// rd.Snapshot = snapshot
 	return rd
 }
 
@@ -221,6 +220,9 @@ func (rn *RawNode) Advance(rd Ready) {
 		rn.Raft.tryUpdateApplied(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
 	if !IsEmptySnap(&rd.Snapshot) {
+		// notify the raft the pending snapshot is applied.
+		l.pendingSnapshot = nil
+		// FIXME: Shall I update right here? or in handleInstallSnapshot?
 		l.lastIncludedIndex = rd.Snapshot.Metadata.Index
 		l.lastIncludedTerm = rd.Snapshot.Metadata.Term
 	}

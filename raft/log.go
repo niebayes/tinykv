@@ -101,6 +101,9 @@ func newLog(storage Storage) *RaftLog {
 	// retrieve truncated state.
 	l.lastIncludedIndex = fi - 1
 	l.lastIncludedTerm, _ = storage.Term(fi - 1)
+	// these assignments are not necessary.
+	l.entries[0].Index = l.lastIncludedIndex
+	l.entries[0].Term = l.lastIncludedTerm
 
 	// restore stable entries from storage.
 	// note, Entries takes a range [lo, hi) with left closed and right open.
@@ -139,6 +142,7 @@ func (l *RaftLog) nextEnts() []pb.Entry {
 	if len(ents) == 0 {
 		return nil
 	}
+	// FIXME: Do I need to modify this to accomodate snapshotting?
 	begin := max(l.applied+1, ents[0].Index)
 	end := min(l.committed, l.LastIndex())
 	if begin > end {
@@ -175,6 +179,8 @@ func (l *RaftLog) sliceEndAt(i uint64) []pb.Entry {
 }
 
 // LastIndex return the last index of the log entries
+// TODO: use the ent[0] to store lastIncludedIndex and lastIncludedTerm.
+// TODO: ensure this function is correct.
 func (l *RaftLog) LastIndex() uint64 {
 	return max(l.entries[len(l.entries)-1].Index, l.lastIncludedIndex)
 }
@@ -217,15 +223,9 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	return ent.Term, nil
 }
 
-// We need to compact the log entries in some point of time like
-// storage compact stabled log entries prevent the log entries
-// grow unlimitedly in memory
-func (l *RaftLog) maybeCompact() {
-	// Your Code Here (2C).
-}
-
 func (l *RaftLog) hasPendingSnapshot() bool {
-	return l.pendingSnapshot != nil && len(l.pendingSnapshot.Data) > 0
+	// FIXME: Shall I also check snap.Data is not nil?
+	return !IsEmptySnap(l.pendingSnapshot)
 }
 
 func (l *RaftLog) isValidIndex(i uint64) bool {
