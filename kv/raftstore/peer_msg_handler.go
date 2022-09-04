@@ -215,10 +215,33 @@ func (d *peerMsgHandler) processNonLeader(ent eraftpb.Entry, cmd *raft_cmdpb.Raf
 }
 
 func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) {
+	// A scenario worth noting:
+	// if the log entry corresponding to a raft cmd is committed, it will eventually be executed by
+	// all alive peers. Assume the old leader crashes or is partitioned after committing this log
+	// entry, the new elected leader must be one of the servers that has been already appended this
+	// log entry, since the vote restriction says only the server has the most up-to-date log will
+	// become the new leader. Even if the new leader does not aware of this log entris was committed,
+	// upon becoming the leader, this server will append and commit a no-op entry, and as a result
+	// all preceding uncommitted entries will be committed.
+
+	// Another scenario worth noting:
+	// assume a client sends a Put request following a Get request on the same key.
+	// if the current leader crashes or is partitioned after committing and responding the log entry
+	// corresponding to the Put request, the subsequent Get request would still get the expected
+	// value. This is because if the log entry corresponding to the Put request is committed, it will
+	// eventually be executed by all alive peers which certainly includes the new leader. And each
+	// peer would execute log entries in order, and hence before the new leader responding the Get
+	// request, it must have been executed the Put request.
+
+	// FIXME: How does tinykv handles this problem?
+	// if the leader crashes after committing the log entry but before responding to the client,
+	// the client will retry the command with a new leader, causing it to be executed a second time.
+	// The solution is for clients to assign unique serial numbers to every command. Then, the state
+	// machine tracks the latest serial number processed for each client, along with the associated
+	// response. If it receives a command whose serial number has already been executed, it responds
+	// immediately without re-executing the request.
+
 	// if this raft cmd contains at least one snap request, then we need to new a txn.
-	// FIXME: Shall I need to cache the response? Or else, what if there's no corresponding 
-	// proposal found for this raft cmd right now, and then the proposal is resent us and it will 
-	// be executed twice?
 	cmd_resp, needNewTxn := d.processRaftCommand(ent, cmd)
 
 	// find the corresponding proposal of this log entry.
@@ -234,10 +257,10 @@ func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCm
 
 		} else if p.index == ent.Index && p.term == ent.Term {
 			// notify the client.
-			// note, although a raft cmd may contain multiple requests, but there cannot be multiple 
-			// snap requests in one raft cmd. This is because a snap request is only issued when the Reader 
-			// interface is called on the Storage interface. And one Reader call only issue a single 
-			// snap request, and no more other requests. 
+			// note, although a raft cmd may contain multiple requests, but there cannot be multiple
+			// snap requests in one raft cmd. This is because a snap request is only issued when the Reader
+			// interface is called on the Storage interface. And one Reader call only issue a single
+			// snap request, and no more other requests.
 			// so we only need to bind the new txn on the raft cmd, rather than on each snap request.
 			if needNewTxn {
 				p.cb.Txn = d.ctx.engine.Kv.NewTransaction(false)
@@ -289,6 +312,11 @@ func (d *peerMsgHandler) handleRequest(request *raft_cmdpb.Request, cmd_resp *ra
 	needNewTxn := false
 	switch request.CmdType {
 	case raft_cmdpb.CmdType_Get:
+		// FIXME: Does tinykv implement this mechanism? If yes, where?
+		// a leader must check whether it has been deposed before processing a read-only request
+		// (its information may be stale if a more recent leader has been elected).
+		// Raft handles this by having the leader exchange heartbeat messages
+		// with a majority of the cluster before responding to read-only requests.
 		resp := d.handleGetRequest(request)
 		cmd_resp.Responses = append(cmd_resp.Responses, &raft_cmdpb.Response{
 			CmdType: raft_cmdpb.CmdType_Get,

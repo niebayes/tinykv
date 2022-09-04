@@ -5,5 +5,5 @@ import (
 )
 
 // handleSnapshot handle Snapshot RPC request
-func (r *Raft) handleSnapshot(msg pb.Message) {
+func (r *Raft) handleSnapshot(m pb.Message) {
 }
