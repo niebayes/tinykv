@@ -51,7 +51,7 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 // (2) Each raft cmd corresponds to one proposal. There defines a `proposals` field in `peer` struct and you shall
 // interact with it both in `proposeRaftCommand` and `HandleRaftReady`. There also defines some helper functions you may need in `kv/raftstore/peer.go`.
 // (3) Keep in mind to handle errors in `proposeRaftCommand` and `HandleRaftReady`. Refer to `kv/raftstore/util/errors.go` for what errors you shall
-// handle, and refer to `kv/raftstore/cmd_resp.go` for how to binding these errors to `Resp` in `message.Callback`.
+// handle, and refer to `kv/raftstore/cmd_resp.go` for how to bind these errors to `Resp` in `message.Callback`.
 // (4) For this part and subsequent parts, an unreliable mock network is used as the testing environment. There might still have some flaws in your implementation
 // even if you've passed one run of the tests. To ensure your implementation is correct, you shall run the tests multiple times. The great MIT 6.824 course has
 // provided a [python script](https://blog.josejg.com/debugging-pretty/) for running multiple run of tests in parallel. It also provides a python script for prettifying
@@ -195,6 +195,8 @@ func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest,
 		applyState.TruncatedState.Index = request.CompactIndex
 		applyState.TruncatedState.Term = request.CompactTerm
 		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+
+		// TODO: write to db and then schedule.
 
 		d.ScheduleCompactLog(applyState.TruncatedState.Index)
 		logger.ScheduleCompactLog(d.PeerId(), applyState.TruncatedState.Index, applyState.TruncatedState.Term)

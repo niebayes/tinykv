@@ -18,6 +18,7 @@ type RaftLogGCTask struct {
 type raftLogGcTaskRes uint64
 
 type raftLogGCTaskHandler struct {
+	// only used for testing, in runner_test.go
 	taskResCh chan<- raftLogGcTaskRes
 }
 

@@ -356,6 +356,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 
+	// FIXME: Why the order of Delete and Set is not critical? How badger db handle a write batch.
 	// clear old metadata and data.
 	err := ps.clearMeta(kvWB, raftWB)
 	if err != nil {
@@ -368,8 +369,11 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 
 	// TODO: add logger.
 
+	// TODO: ignore stale snapshot by comparing truncated index and snapshot index.
+	// but this is not necessary iff we do not decrease truncated index and other stuff.
+
 	// update raft state.
-	// FIXME: Is the logic updating term correct?
+	// TODO: update term only when term is changed.
 	// FIXME: Do I need to update these right here?
 	ps.raftState.HardState.Commit = max(ps.raftState.HardState.Commit, si)
 	ps.raftState.HardState.Term = max(ps.raftState.HardState.Term, st)

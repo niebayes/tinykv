@@ -57,6 +57,12 @@ func (r *Raft) handleInstallSnapshot(m pb.Message) {
 
 	l := r.RaftLog
 
+	// ignore stale snapshot.
+	// this is not necessary iff we do not decrease commit index and applied index.
+	if snap.Metadata.Index <= l.committed {
+		return
+	}
+
 	// do not install this snapshot, if there's already a pending snapshot.
 	if l.hasPendingSnapshot() {
 		return
@@ -80,6 +86,7 @@ func (r *Raft) handleInstallSnapshot(m pb.Message) {
 	// note, the goal is the state machine state, not having to execute all log entries.
 	// therefore upon receiving a snapshot, we can safely discard all log entries before and including
 	// the snapshot index.
+
 	for i := 1; i < int(l.Len()); i++ {
 		ent := l.entries[i]
 		if ent.Index == si && ent.Term == st {
@@ -105,11 +112,27 @@ func (r *Raft) handleInstallSnapshot(m pb.Message) {
 	}
 	l.lastIncludedIndex = max(l.lastIncludedIndex, si)
 	l.committed = max(l.committed, si) // never decrease commit index.
-	// FIXME: Shall I update applied index and stabled index right here?
+	// TODO: Delay the update of applied index and stabled index to the peer.
 	l.applied = max(l.applied, si) // never decrease applied index.
-	l.stabled = l.LastIndex()      // stabled index may decrease.
-	r.restoreConfState(snap.Metadata.ConfState)
+	// TODO: fix stabled index update logic.
+	l.stabled = max(l.stabled, si)
+	if snap.Metadata.ConfState != nil {
+		// always update conf state?
+		r.restoreConfState(snap.Metadata.ConfState)
+	}
 
 	r.Logger.logStateAfterSnapshot(oldCommitted, oldStabled, oldApplied,
 		oldLastIncludedIndex, oldLastIncludedTerm)
+
+	// TODO: send AppendEntries response to tell the leader my progress.
+	// this is not necessary.
+	// FIXME: Shall I design a HandleInstallSnapshotResponse?
+	r.forwardMsgUp(pb.Message{
+		MsgType:   pb.MessageType_MsgAppendResponse,
+		To:        m.From,
+		From:      r.id,
+		Term:      r.Term,
+		Reject:    false,
+		NextIndex: min(l.LastIndex(), l.committed),
+	})
 }
