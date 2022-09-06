@@ -352,17 +352,32 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		return nil, err
 	}
 
-	// Hint: things need to do here including: update peer storage state like raftState and applyState, etc,
-	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
-	// and ps.clearExtraData to delete stale data
+	// do the dirty work of applying a snapshot.
+	ps.snapState.StateType = snap.SnapState_Applying
+	notifier := make(chan bool)
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: ps.region.Id,
+		Notifier: notifier,
+		SnapMeta: snapshot.Metadata,
+		StartKey: ps.region.StartKey,
+		EndKey:   ps.region.EndKey,
+	}
 
-	// FIXME: Why the order of Delete and Set is not critical? How badger db handle a write batch.
-	// clear old metadata and data.
+	// wait until the region task is finished.
+	<-notifier
+
+	// clear keys in old region but not in new region.
+	// this deletion is async, and it will log fatal if fail.
+	// even if it fails, as long as the snapshot is installed successfully,
+	// there would be no problem since these keys are stale keys, they would not affect
+	// the subsequent queries.
+	ps.clearExtraData(snapData.Region)
+
+	// clear stale metadata.
 	err := ps.clearMeta(kvWB, raftWB)
 	if err != nil {
 		return nil, err
 	}
-	ps.clearExtraData(snapData.Region)
 
 	si := snapshot.Metadata.Index
 	st := snapshot.Metadata.Term
@@ -376,7 +391,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// TODO: update term only when term is changed.
 	// FIXME: Do I need to update these right here?
 	ps.raftState.HardState.Commit = max(ps.raftState.HardState.Commit, si)
-	ps.raftState.HardState.Term = max(ps.raftState.HardState.Term, st)
 	// FIXME: Do I need to update these right here?
 	ps.raftState.LastIndex = max(ps.raftState.LastIndex, si)
 	ps.raftState.LastTerm = max(ps.raftState.LastTerm, st)
@@ -392,20 +406,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// update region state.
 	// note, ps.region and peer state are not modified inside this function.
 	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
-
-	// do the dirty work of applying a snapshot.
-	ps.snapState.StateType = snap.SnapState_Applying
-	notifier := make(chan bool)
-	ps.regionSched <- &runner.RegionTaskApply{
-		RegionId: ps.region.Id,
-		Notifier: notifier,
-		SnapMeta: snapshot.Metadata,
-		StartKey: ps.region.StartKey,
-		EndKey:   ps.region.EndKey,
-	}
-
-	// wait until the region task is finished.
-	<-notifier
 
 	// Now the snapshot is applied.
 	applySnapResult := &ApplySnapResult{

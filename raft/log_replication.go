@@ -472,18 +472,18 @@ func (r *Raft) sendAppendEntries(to uint64, must bool) {
 	l := r.RaftLog
 	pr := r.Prs[to]
 
+	// entries to be sent were compacted, send snapshot instead.
+	if pr.Next-1 < l.lastIncludedIndex {
+		r.sendInstallSnapshot(to)
+		return
+	}
+
 	prevLogIndex := l.lastIncludedIndex
 	prevLogTerm := l.lastIncludedTerm
 	prevLog, err := l.Entry(pr.Next - 1)
 	if err == nil {
 		prevLogIndex = prevLog.Index
 		prevLogTerm = prevLog.Term
-	}
-
-	// entries to be sent were compacted, send snapshot instead.
-	if prevLogIndex < l.lastIncludedIndex {
-		r.sendInstallSnapshot(to)
-		return
 	}
 
 	// entries to be sent.

@@ -202,6 +202,9 @@ func (l *RaftLog) Len() uint64 {
 
 // return (entry, nil) where the entry is the entry at index index if the entry exists. Otherwise, return (nil, error)
 func (l *RaftLog) Entry(i uint64) (*pb.Entry, error) {
+	if i <= l.lastIncludedIndex {
+		return nil, ErrCompacted
+	}
 	if !l.isValidIndex(i) {
 		return nil, ErrIndexOutOfRange
 	}

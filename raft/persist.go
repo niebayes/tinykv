@@ -25,17 +25,22 @@ func (r *Raft) restoreHardState(hardState *pb.HardState) {
 }
 
 func (r *Raft) restoreConfState(confState *pb.ConfState) {
+	// clear and reset peer progresses.
+	r.Prs = make(map[uint64]*Progress)
 	for _, id := range confState.Nodes {
 		if _, ok := r.Prs[id]; !ok {
 			r.Prs[id] = r.newProgress()
 		}
 	}
+	// reset vote record since config state changes.
+	r.resetVoteRecord()
+
 	r.Logger.restoreConfState(confState)
 }
 
 func (r *Raft) newProgress() *Progress {
 	return &Progress{
-		Next:  r.RaftLog.LastIndex() + 1,
+		Next: r.RaftLog.LastIndex() + 1,
 		// FIXME: Shall I adjust Match to raft init log index?
 		Match: 0,
 	}

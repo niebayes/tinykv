@@ -130,22 +130,20 @@ func newRaft(c *Config) *Raft {
 	}
 
 	r := &Raft{
-		id:      c.ID,
-		Term:    0,
-		Vote:    None,
-		RaftLog: newLog(c.Storage),
-		Prs:     make(map[uint64]*Progress),
-		State:   StateFollower,
-		votes:   make(map[uint64]bool),
-		msgs:    make([]pb.Message, 0),
-		Lead:    None,
-		// hint: adjust election time out to make the leader election faster and stable.
+		id:                  c.ID,
+		Term:                0,
+		Vote:                None,
+		RaftLog:             newLog(c.Storage),
+		Prs:                 make(map[uint64]*Progress),
+		State:               StateFollower,
+		votes:               make(map[uint64]bool),
+		msgs:                make([]pb.Message, 0),
+		Lead:                None,
 		heartbeatTimeout:    c.HeartbeatTick,
 		electionTimeoutBase: c.ElectionTick,
-		// heartbeatTimeout:    2 * c.HeartbeatTick,
-		// electionTimeoutBase: 2 * c.ElectionTick,
-		heartbeatElapsed: 0,
-		electionElapsed:  0,
+		heartbeatElapsed:    0,
+		electionElapsed:     0,
+		raftInitLogIndex:    0,
 	}
 
 	// init logger.
@@ -155,9 +153,8 @@ func newRaft(c *Config) *Raft {
 	// init peer progress. (only for testing).
 	// TODO: add a hint for how to init peer progress in project2b.
 	for _, id := range c.peers {
-		r.Prs[id] = &Progress{}
+		r.Prs[id] = r.newProgress()
 	}
-	r.resetPeerProgress()
 
 	// check if there're some restored stable entries.
 	l := r.RaftLog
@@ -167,14 +164,16 @@ func newRaft(c *Config) *Raft {
 
 	// restore persisted states.
 	hardstate, confState, _ := c.Storage.InitialState()
-	r.restoreHardState(&hardstate)
-	r.restoreConfState(&confState)
+	if !IsEmptyHardState(hardstate) {
+		r.raftInitLogIndex = hardstate.Commit
+		r.restoreHardState(&hardstate)
+	}
+	if len(confState.Nodes) > 0 {
+		r.restoreConfState(&confState)
+	}
 
-	r.raftInitLogIndex = hardstate.Commit
-
-	// TODO: restore AppliedIndex from cfg upon restart.
-	// FIXME: is this reasonable/necessary?
-	l.applied = c.Applied
+	// on recovery, c.Applied is set according to persisted applied index.
+	l.applied = max(c.Applied, l.applied)
 
 	// TODO: restore persisted log from snapshot.
 
@@ -357,8 +356,8 @@ func (r *Raft) forwardMsgUp(msg pb.Message) {
 
 func (r *Raft) hardState() pb.HardState {
 	return pb.HardState{
-		Term: r.Term, 
-		Vote: r.Vote, 
+		Term:   r.Term,
+		Vote:   r.Vote,
 		Commit: r.RaftLog.committed,
 	}
 }

@@ -12,7 +12,6 @@ func (r *Raft) sendInstallSnapshot(to uint64) {
 		return
 	}
 	// unknown error occurs.
-	// FIXME: Shall I panic? Failed for 5 times to get snapshot will raise an error as well
 	if err != nil || IsEmptySnap(&snap) {
 		panic(err)
 	}
