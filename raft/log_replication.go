@@ -123,7 +123,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			// that the first entry's term is not the conflict term.
 			nextIndex := prevLogIndex
 			conflictTerm := ent.Term
-			for index := prevLogIndex - 1; index > l.lastIncludedIndex; index-- {
+			// for index := prevLogIndex - 1; index > l.lastIncludedIndex; index-- {
+			for index := prevLogIndex - 1; index > l.committed; index-- {
 				ent, err = l.Entry(index)
 				if err != nil || ent.Term != conflictTerm {
 					break
@@ -204,6 +205,8 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 			// first search the log with the conflict term.
 			l := r.RaftLog
 			found := false
+
+			// TODO: prove and elaborate my design.
 			for i := 1; i < int(l.Len()); i++ {
 				// note, there's a dummy entry at the head.
 				ent := l.entries[i]
@@ -472,7 +475,10 @@ func (r *Raft) sendAppendEntries(to uint64, must bool) {
 	l := r.RaftLog
 	pr := r.Prs[to]
 
-	// entries to be sent were compacted, send snapshot instead.
+	// to send a slice of log entries, we must get the prevLogIndex and prevLogTerm for
+	// log consistency checking. The prevLogIndex can be calculated by mathematics, but
+	// prevLogTerm cannot be retrieved if the corresponding log entry was compacted.
+	// In such a scenario, we need to send a snapshot instead.
 	if pr.Next-1 < l.lastIncludedIndex {
 		r.sendInstallSnapshot(to)
 		return

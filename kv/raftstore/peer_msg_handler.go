@@ -278,7 +278,7 @@ func (d *peerMsgHandler) processNonLeader(ent eraftpb.Entry, cmd *raft_cmdpb.Raf
 
 func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) {
 	// A scenario worth noting:
-	// if the log entry corresponding to a raft cmd is committed, it will eventually be executed by
+	// if the log entry corresponding to a raft cmd is committed, it will eventually be committed by
 	// all alive peers. Assume the old leader crashes or is partitioned after committing this log
 	// entry, the new elected leader must be one of the servers that has been already appended this
 	// log entry, since the vote restriction says only the server has the most up-to-date log will
@@ -312,6 +312,7 @@ func (d *peerMsgHandler) processLeader(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCm
 	for i := 0; !d.stopped && i < len(d.proposals); i++ {
 		p := d.proposals[i]
 		// FIXME: Is my stale check incorrect?
+		// TODO: modify the check logic.
 		if p.index < ent.Index || p.term < ent.Term {
 			if p.cb != nil {
 				NotifyStaleReq(d.Term(), p.cb)
