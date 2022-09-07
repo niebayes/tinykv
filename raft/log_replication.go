@@ -26,6 +26,11 @@ import (
 func (r *Raft) handlePropose(m pb.Message) {
 	r.Logger.recvPROP(m)
 
+	// a leader transferring is in progress, do not serve proposals.
+	if r.leadTransferee != None {
+		return
+	}
+
 	// ignore the proposal if no entries.
 	if len(m.Entries) == 0 {
 		return
@@ -260,7 +265,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	// if the from node is the current transfer target, and it catches up with me,
 	// send TimeoutNow to it immediately.
 	// FIXME: Shall I compares Match with commit index or last log index?
-	if m.From == r.leadTransferee && pr.Match >= l.committed {
+	if m.From == r.leadTransferee && pr.Match >= l.LastIndex() {
 		r.sendTimeoutNow(m.From)
 	}
 }
@@ -342,11 +347,10 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 
 	// if the from node is the current transfer target, and it catches up with me,
 	// send TimeoutNow to it immediately.
-	// FIXME: Shall I compares Match with commit index or last log index?
 	// FIXME: Shall I also check TimeoutNow sending condition right here?
-	if m.From == r.leadTransferee && pr.Match >= l.committed {
-		r.sendTimeoutNow(m.From)
-	}
+	// if m.From == r.leadTransferee && pr.Match >= l.LastIndex() {
+	// 	r.sendTimeoutNow(m.From)
+	// }
 
 	// now, I know this peer is alive but I don't know if it catches up.
 	// if in my view, it does not catch up with me, I immediately send entries
@@ -572,6 +576,7 @@ func (r *Raft) tryUpdateCommitted(committed, lastNewEntryIndex uint64) {
 	}
 }
 
+// FIXME: seems there's a bug in updating commit index and applied index.
 func (r *Raft) tryUpdateApplied(applied uint64) {
 	l := r.RaftLog
 	if applied < l.applied || applied > l.committed {

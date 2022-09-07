@@ -5,9 +5,6 @@ import (
 )
 
 func (r *Raft) handleTransferLeader(m pb.Message) {
-	r.Logger.recvTRAN(m.From)
-	// TransferLeader is a local msg which has term equals to 0, so don't drop it by comparing terms.
-
 	// FIXME: Shall a follower redirects TransferLeader?
 	// TODO: figure out which msgs shall be redirected to leader?
 	if r.State == StateFollower {
@@ -18,11 +15,14 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 		return
 	}
 
+	// TransferLeader is a local msg which has term equals to 0, so don't drop it by comparing terms.
+
 	// the leadership transferring to node m.From is in progress, wait for a while.
 	if r.leadTransferee == m.From {
 		return
 	}
 	// start a new round of leadership transfer even when there's a pending transferring to another node.
+	r.Logger.recvTRAN(m.From)
 
 	// by convention, the upper application set m.From to the transfer target's id.
 	pr, ok := r.Prs[m.From]
@@ -51,7 +51,7 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 	l := r.RaftLog
 	// FIXME: Shall I compare Match with commit index or last log index?
 	// etcd chooses the later one, but the raft phd paper seems suggests the former one.
-	if pr.Match >= l.committed {
+	if pr.Match >= l.LastIndex() {
 		r.sendTimeoutNow(m.From)
 	} else {
 		// otherwise, we have to wait for it catching up with me, or abort the transfering due to transfer time out.

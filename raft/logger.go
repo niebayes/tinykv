@@ -548,7 +548,7 @@ func (l *Logger) recvTRAN(to uint64) {
 
 func (l *Logger) recvTNOW(m pb.Message) {
 	r := l.r
-	l.printf(TRAN, "N%v <- N%v TRANS (CI:%v LI:%v LT:%v)", r.id, m.From, m.Commit, m.Index, m.LogTerm)
+	l.printf(TRAN, "N%v <- N%v TNOW (CI:%v LI:%v LT:%v)", r.id, m.From, m.Commit, m.Index, m.LogTerm)
 }
 
 func (l *Logger) leaderQualified() {

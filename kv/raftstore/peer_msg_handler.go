@@ -300,7 +300,13 @@ func (d *peerMsgHandler) handleChangePeer(request *raft_cmdpb.ChangePeerRequest,
 	}
 }
 
-func (d *peerMsgHandler) handleSplit(request *raft_cmdpb.SplitRequest, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) handleSplit(request *raft_cmdpb.SplitRequest, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) {
+	// region := d.Region()
+
+	// newPeer, err := createPeer(d.storeID(), d.ctx.cfg, d.ctx.schedulerTaskSender, d.ctx.engine, d.Region())
+	// if err != nil {
+	// 	panic(err)
+	// }
 }
 
 func (d *peerMsgHandler) handleAdminRequest(request *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
@@ -312,7 +318,7 @@ func (d *peerMsgHandler) handleAdminRequest(request *raft_cmdpb.AdminRequest, kv
 	case raft_cmdpb.AdminCmdType_TransferLeader:
 		panic("transfer leader cmd won't reach here")
 	case raft_cmdpb.AdminCmdType_Split:
-		d.handleSplit(request.Split, kvWB)
+		// I choose to handle Split in processRaftCommand since I have to set the response.
 	default:
 		panic("invalid admin request type")
 	}
@@ -334,7 +340,11 @@ func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.R
 	oldTruncatedTerm := applyState.TruncatedState.Term
 
 	if cmd.AdminRequest != nil {
-		d.handleAdminRequest(cmd.AdminRequest, kvWB)
+		if cmd.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_Split {
+			d.handleSplit(cmd.AdminRequest.Split, cmd_resp, kvWB)
+		} else {
+			d.handleAdminRequest(cmd.AdminRequest, kvWB)
+		}
 	}
 
 	if ent.EntryType == eraftpb.EntryType_EntryConfChange {
@@ -464,9 +474,12 @@ func (d *peerMsgHandler) process(ent eraftpb.Entry) {
 	}
 
 	cmd := &raft_cmdpb.RaftCmdRequest{}
-	err := proto.Unmarshal(ent.Data, cmd)
-	if err != nil {
-		panic(err)
+	// for EntryType_EntryConfChange, the data is pb.ConfChange and so cannot be marshalled like this.
+	if ent.EntryType == eraftpb.EntryType_EntryNormal {
+		err := proto.Unmarshal(ent.Data, cmd)
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	// leader and non-leaders has different behaviors on processing a raft cmd.

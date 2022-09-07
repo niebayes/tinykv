@@ -255,13 +255,13 @@ func (r *Raft) tickHeartbeat() {
 // advance transfer timer and check if it times out. If times out, abort the pending leader transfering
 // and resume client operations.
 func (r *Raft) tickTransfer() {
-	// only tick is there's a pending leadership transferring.
+	// only tick if there's a pending leadership transferring.
 	if r.leadTransferee == None {
 		return
 	}
 
 	r.transferElapsed++
-	if r.electionElapsed >= r.transferTimeout {
+	if r.transferElapsed >= r.transferTimeout {
 		r.transferElapsed = 0
 		r.leadTransferee = None
 
