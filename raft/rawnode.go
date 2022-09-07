@@ -242,6 +242,9 @@ func (rn *RawNode) Advance(rd Ready) {
 	if !IsEmptyHardState(rd.HardState) {
 		rn.prevHardState = rd.HardState
 	}
+	if rd.SoftState != nil {
+		rn.prevSoftState = rd.SoftState
+	}
 
 	// rn.Raft.Logger.AdvanceRaft(oldStabled, oldApplied, oldLastIncludedIndex,
 	// 	oldLastIncludedTerm, prevTerm, prevVote, prevCommit)
