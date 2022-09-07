@@ -41,6 +41,7 @@ func (a *SoftState) equal(b *SoftState) bool {
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
 type Ready struct {
+	// FIXME: the SoftState seems never could be nil?
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
 	// It is not required to consume or store SoftState.
