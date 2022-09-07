@@ -192,6 +192,7 @@ func (rn *RawNode) Ready() Ready {
 // (3) if there're newly committed entries to be applied,
 // (4) if there're pending snapshot to be installed.
 // (5) if the hardstate needs to be updated.
+// (6) if the softstate needs to be updated.
 func (rn *RawNode) HasReady() bool {
 	l := rn.Raft.RaftLog
 	curSoftState := rn.Raft.softState()

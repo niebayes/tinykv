@@ -87,6 +87,7 @@ type peer struct {
 
 	// Index of last scheduled compacted raft log.
 	// (Used in 2C)
+	// FIXME: Do I need this?
 	LastCompactedIdx uint64
 
 	// Cache the peers information from other stores

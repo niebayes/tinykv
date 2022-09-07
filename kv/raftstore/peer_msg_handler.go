@@ -64,20 +64,36 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 
+	// FIXME: How to check if a raft cmd is stale or not? What raft cmds are regarded as stale cmds?
+	if err = util.CheckTerm(msg, d.Term()); err != nil {
+		BindRespError(cb.Resp, &util.ErrStaleCommand{})
+		// FIXME: Shall I use NotifyStaleReq?
+		cb.Done(cb.Resp)
+		return
+	}
+
+	// since there's no need to do replication on a TransferLeader cmd, we directly execute it right here.
+	// note, TransferLeader can be sent to a non-leader.
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_TransferLeader {
+		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+		// FIXME: Shall reply right here or delay until the transferring is completed or aborted?
+		if cb != nil {
+			cmd_resp := newCmdResp()
+			cmd_resp.AdminResponse = &raft_cmdpb.AdminResponse{
+				CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
+				TransferLeader: &raft_cmdpb.TransferLeaderResponse{},
+			}
+			cb.Done(cmd_resp)
+		}
+		return
+	}
+
 	if !d.IsLeader() {
 		// I'm not the leader, but I will tell you which peer I think it's the leader.
 		BindRespError(cb.Resp, &util.ErrNotLeader{
 			RegionId: d.regionId,
 			Leader:   d.getPeerFromCache(d.LeaderId()),
 		})
-		cb.Done(cb.Resp)
-		return
-	}
-
-	// FIXME: How to check if a raft cmd is stale or not? What raft cmds are regarded as stale cmds?
-	if err = util.CheckTerm(msg, d.Term()); err != nil {
-		BindRespError(cb.Resp, &util.ErrStaleCommand{})
-		// FIXME: Shall I use NotifyStaleReq?
 		cb.Done(cb.Resp)
 		return
 	}
@@ -106,9 +122,20 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	// this is because the raft module is responsible for replicating cmds, it does not execute cmds.
 	// when the raft worker notifies this cmd is replicated successfully (i.e. committed, which will eventually be replicated on all servers),
 	// it then executes the cmd by applying each request contained in the cmd to the state machine.
-	err = d.RaftGroup.Propose(data)
-	if err != nil {
-		panic(err)
+
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer {
+		cc := eraftpb.ConfChange{
+			ChangeType: msg.AdminRequest.ChangePeer.ChangeType,
+			NodeId:     msg.AdminRequest.ChangePeer.Peer.Id,
+		}
+		if err = d.RaftGroup.ProposeConfChange(cc); err != nil {
+			panic(err)
+		}
+
+	} else {
+		if err = d.RaftGroup.Propose(data); err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -203,13 +230,77 @@ func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest,
 	}
 }
 
-func (d *peerMsgHandler) handleChangePeer(request *raft_cmdpb.ChangePeerRequest) {
+func (d *peerMsgHandler) handleChangePeer(request *raft_cmdpb.ChangePeerRequest, kvWB *engine_util.WriteBatch) {
+	switch request.ChangeType {
+	case eraftpb.ConfChangeType_AddNode:
+		// FIXME: Is this strategy enough?
+		// check duplication of peer to de-duplicate duplication of the same config change cmds.
+		region := d.peerStorage.region
+		dup := false
+		for _, p := range region.Peers {
+			// the peer already is in the raft group.
+			if p.Id == request.Peer.Id && p.StoreId == request.Peer.StoreId {
+				dup = true
+			}
+		}
+		if dup {
+			return
+		}
+
+		// update region state.
+		// the next round of heartbeat will try to access the new added peer,
+		// and the store worker would try to create a peer instance for this peer
+		// by calling `maybeCreatePeer`. If this call succeeds, the new added peer
+		// will start its work.
+		region.RegionEpoch.ConfVer++
+		region.Peers = append(region.Peers, request.Peer)
+
+		// update store meta.
+		// FIXME: Shall I update store meta right here or delay it until the region state is persisted?
+		// FIXME: Shall I lock when updating?
+		// FIXME: Shall I persist store meta? How?
+		storeMeta := d.ctx.storeMeta
+		storeMeta.Lock()
+		storeMeta.regions[d.regionId] = region
+		storeMeta.Unlock()
+
+		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+
+	case eraftpb.ConfChangeType_RemoveNode:
+		// TODO: Handle duplicate remove node config change cmd.
+
+		if d.PeerId() == request.Peer.Id && d.storeID() == request.Peer.StoreId {
+			region := d.peerStorage.region
+			region.RegionEpoch.ConfVer++
+			newPeers := make([]*metapb.Peer, 0)
+			for _, p := range region.Peers {
+				if p.Id != request.Peer.Id || p.StoreId != request.Peer.StoreId {
+					newPeers = append(newPeers, p)
+				}
+			}
+			region.Peers = newPeers
+
+			// update store meta.
+			// FIXME: Shall I update store meta right here or delay it until the region state is persisted?
+			// FIXME: Shall I lock when updating?
+			// FIXME: Shall I persist store meta? How?
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			delete(storeMeta.regions, d.regionId)
+			storeMeta.Unlock()
+
+			// I am the one to be removed, stop the raft module.
+			// FIXME: d.stopped means the peer is stopped or only the raft module is stopped?
+			// TODO: figure out where needs to check d.stopped.
+			d.destroyPeer()
+		}
+
+	default:
+		panic("unknown change type")
+	}
 }
 
-func (d *peerMsgHandler) handleTransferLeader(request *raft_cmdpb.TransferLeaderRequest) {
-}
-
-func (d *peerMsgHandler) handleSplit(request *raft_cmdpb.SplitRequest) {
+func (d *peerMsgHandler) handleSplit(request *raft_cmdpb.SplitRequest, kvWB *engine_util.WriteBatch) {
 }
 
 func (d *peerMsgHandler) handleAdminRequest(request *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
@@ -217,11 +308,11 @@ func (d *peerMsgHandler) handleAdminRequest(request *raft_cmdpb.AdminRequest, kv
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		d.handleCompactLog(request.CompactLog, kvWB)
 	case raft_cmdpb.AdminCmdType_ChangePeer:
-		d.handleChangePeer(request.ChangePeer)
+		d.handleChangePeer(request.ChangePeer, kvWB)
 	case raft_cmdpb.AdminCmdType_TransferLeader:
-		d.handleTransferLeader(request.TransferLeader)
+		panic("transfer leader cmd won't reach here")
 	case raft_cmdpb.AdminCmdType_Split:
-		d.handleSplit(request.Split)
+		d.handleSplit(request.Split, kvWB)
 	default:
 		panic("invalid admin request type")
 	}
@@ -230,16 +321,6 @@ func (d *peerMsgHandler) handleAdminRequest(request *raft_cmdpb.AdminRequest, kv
 func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.RaftCmdRequest) (*raft_cmdpb.RaftCmdResponse, bool) {
 	kvWB := new(engine_util.WriteBatch)
 	cmd_resp := newCmdResp()
-
-	if ent.EntryType == eraftpb.EntryType_EntryConfChange {
-		cc := eraftpb.ConfChange{}
-		if err := proto.Unmarshal(ent.Data, &cc); err != nil {
-			panic(err)
-		}
-		// TODO: persist conf state.
-		// FIXME: How to persist conf state?
-		d.RaftGroup.ApplyConfChange(cc)
-	}
 
 	needNewTxn := false
 	for _, request := range cmd.Requests {
@@ -254,6 +335,16 @@ func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.R
 
 	if cmd.AdminRequest != nil {
 		d.handleAdminRequest(cmd.AdminRequest, kvWB)
+	}
+
+	if ent.EntryType == eraftpb.EntryType_EntryConfChange {
+		cc := eraftpb.ConfChange{}
+		if err := proto.Unmarshal(ent.Data, &cc); err != nil {
+			panic(err)
+		}
+		// TODO: persist conf state.
+		// FIXME: How to persist conf state? And do I need to persist it?
+		d.RaftGroup.ApplyConfChange(cc)
 	}
 
 	oldAppliedIndex := applyState.AppliedIndex
@@ -400,9 +491,6 @@ func (d *peerMsgHandler) handleClientRequest(request *raft_cmdpb.Request, cmd_re
 			CmdType: raft_cmdpb.CmdType_Get,
 			Get:     resp,
 		})
-		// l := makeLogger(false, "")
-		// l.GetResponse(d.PeerId(), p.index, request.Get.Key, resp.Value)
-		// log.Infof("N%v processed Get request: key %v \n", d.PeerId(), string(request.Get.Key))
 
 	case raft_cmdpb.CmdType_Put:
 		resp := d.handlePutRequest(request, kvWB)
@@ -410,7 +498,6 @@ func (d *peerMsgHandler) handleClientRequest(request *raft_cmdpb.Request, cmd_re
 			CmdType: raft_cmdpb.CmdType_Put,
 			Put:     resp,
 		})
-		// log.Infof("N%v processed Put request: key: %v val: %v \n", d.PeerId(), string(request.Put.Key), string(request.Put.Value))
 
 	case raft_cmdpb.CmdType_Delete:
 		resp := d.handleDeleteRequest(request, kvWB)
@@ -418,7 +505,6 @@ func (d *peerMsgHandler) handleClientRequest(request *raft_cmdpb.Request, cmd_re
 			CmdType: raft_cmdpb.CmdType_Delete,
 			Delete:  resp,
 		})
-		// log.Infof("N%v processed Delete request: key %v \n", d.PeerId(), string(request.Delete.Key))
 
 	case raft_cmdpb.CmdType_Snap:
 		resp := d.handleSnapRequest(request)
@@ -429,7 +515,6 @@ func (d *peerMsgHandler) handleClientRequest(request *raft_cmdpb.Request, cmd_re
 		// when a client wishes to read the kv, the storage returns it a snapshot which is wrapped into
 		// a txn. So, we start a new txn here, and let the service handler discards the txn.
 		needNewTxn = true
-		// log.Infof("N%v processed Snap request \n", d.PeerId())
 
 	default:
 		panic("unknown cmd type")
