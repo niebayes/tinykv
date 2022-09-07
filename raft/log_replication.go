@@ -256,6 +256,12 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		// if the commit index is updated, immediately broadcast AppendEntries RPC to notify the followers ASAP.
 		r.bcastAppendEntries(true)
 	}
+
+	// if the from node is the current transfer target, and it catches up with me,
+	// send TimeoutNow to it immediately.
+	if m.From == r.leadTransferee && pr.Match >= l.committed {
+		r.sendTimeoutNow(m.From)
+	}
 }
 
 // broadcast Heartbeat RPC to all other peers in the cluster.
@@ -331,6 +337,12 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	pr, ok := r.Prs[m.From]
 	if !ok {
 		return
+	}
+
+	// if the from node is the current transfer target, and it catches up with me,
+	// send TimeoutNow to it immediately.
+	if m.From == r.leadTransferee && pr.Match >= l.committed {
+		r.sendTimeoutNow(m.From)
 	}
 
 	// now, I know this peer is alive but I don't know if it catches up.

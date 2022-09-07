@@ -95,6 +95,12 @@ type Raft struct {
 	// where randomTimeout is chosed randomly in the range [electionTimeoutBase, 2*electionTimeoutBase].
 	electionTimeout int
 
+	// the raft paper suggests to resume the client operations if leadership transfer does
+	// not complete after about an election timeout.
+	// we convervatively set the transferTimeout to 2*electionTimeoutBase which is the max
+	// value an election timeout could be.
+	transferTimeout int
+
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -102,6 +108,9 @@ type Raft struct {
 	// number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
 	electionElapsed int
+
+	// number of ticks since it reached last transferTimeout.
+	transferElapsed int
 
 	// leadTransferee is id of the leader transfer target when its value is not zero.
 	// Follow the procedure defined in section 3.10 of Raft phd thesis.
@@ -120,6 +129,7 @@ type Raft struct {
 
 	raftInitLogIndex uint64
 
+	// TODO: use the global logger.
 	Logger *Logger
 }
 
@@ -141,9 +151,12 @@ func newRaft(c *Config) *Raft {
 		Lead:                None,
 		heartbeatTimeout:    c.HeartbeatTick,
 		electionTimeoutBase: c.ElectionTick,
+		transferTimeout:     2 * c.ElectionTick,
 		heartbeatElapsed:    0,
 		electionElapsed:     0,
+		transferElapsed:     0,
 		raftInitLogIndex:    0,
+		leadTransferee:      None,
 	}
 
 	// init logger.
@@ -203,6 +216,7 @@ func (r *Raft) tick() {
 		r.tickElection()
 	case StateLeader:
 		r.tickHeartbeat()
+		r.tickTransfer()
 	default:
 		panic("invalid state")
 	}
@@ -213,12 +227,13 @@ func (r *Raft) tick() {
 func (r *Raft) tickElection() {
 	r.electionElapsed++
 	if r.electionElapsed >= r.electionTimeout {
-		r.Logger.elecTimeout()
 		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgHup,
 			From:    r.id,
 			To:      r.id,
 		})
+
+		r.Logger.elecTimeout()
 	}
 }
 
@@ -227,12 +242,30 @@ func (r *Raft) tickElection() {
 func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
-		r.Logger.beatTimeout()
 		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgBeat,
 			From:    r.id,
 			To:      r.id,
 		})
+
+		r.Logger.beatTimeout()
+	}
+}
+
+// advance transfer timer and check if it times out. If times out, abort the pending leader transfering
+// and resume client operations.
+func (r *Raft) tickTransfer() {
+	// only tick is there's a pending leadership transferring.
+	if r.leadTransferee == None {
+		return
+	}
+
+	r.transferElapsed++
+	if r.electionElapsed >= r.transferTimeout {
+		r.transferElapsed = 0
+		r.leadTransferee = None
+
+		r.Logger.transTimeout()
 	}
 }
 
@@ -278,8 +311,10 @@ func (r *Raft) stepFollower(msg pb.Message) {
 		// dropped.
 	case pb.MessageType_MsgSnapshot:
 		r.handleInstallSnapshot(msg)
+	case pb.MessageType_MsgTransferLeader:
+		// dropped.
 	case pb.MessageType_MsgTimeoutNow:
-		//
+		r.handleTimeoutNow(msg)
 	default:
 		panic("invalid msg type")
 	}
@@ -308,8 +343,10 @@ func (r *Raft) stepCandidate(msg pb.Message) {
 		// dropped.
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(msg)
+	case pb.MessageType_MsgTransferLeader:
+		// dropped.
 	case pb.MessageType_MsgTimeoutNow:
-		//
+		r.handleTimeoutNow(msg)
 	default:
 		panic("invalid msg type")
 	}
@@ -337,9 +374,12 @@ func (r *Raft) stepLeader(msg pb.Message) {
 	case pb.MessageType_MsgAppendResponse:
 		r.handleAppendEntriesResponse(msg)
 	case pb.MessageType_MsgSnapshot:
-		// r.handleSnapshot(msg)
+		r.handleSnapshot(msg)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(msg)
 	case pb.MessageType_MsgTimeoutNow:
-		//
+		// FIXME: Shall a leader handles TimeoutNow?
+		r.handleTimeoutNow(msg)
 	default:
 		panic("invalid msg type")
 	}

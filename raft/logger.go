@@ -94,6 +94,20 @@ const (
 	// follower forwards snapshot to service
 	// service conditionally installs a snapshot by asking Raft.
 	SNAP logTopic = "SNAP"
+
+	// leadership transfer events.
+	// receive TransferLeader request from upper application.
+	// cut down client operations.
+	// wait until the transfer target catches up with the leader.
+	// send TimeoutNow to the transfer target.
+	// transfer target receives TimeoutNow and check if it's qualified to be the new leader.
+	// if qualified, the transfer target sends a MsgHup to itself to start a new election immediately.
+	// the current leader receives a RequestVote request from the transfer target
+	// the current leader steps down if it thinks it's stale by comparing the terms.
+	// the transfer target receives a quorum of votes and becomes the new leader.
+	// the client operations are redirected to the new leader.
+	// or the leadership transfering aborts due to transfer timer out. The old leader resumes client operations.
+	TRAN logTopic = "TRAN"
 )
 
 type Logger struct {
@@ -509,4 +523,40 @@ func (l *Logger) logStateAfterSnapshot(oldCommitted, oldStabled, oldApplied, old
 	l.printf(SNAP, "N%v ^sl (AI:%v CI:%v SI:%v LI:%v LT:%v) -> (AI:%v CI:%v SI:%v LI:%v LT:%v)", r.id, oldApplied, oldCommitted,
 		oldStabled, oldLastIncludedIndex, oldLastIncludedTerm, r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled,
 		r.RaftLog.lastIncludedIndex, r.RaftLog.lastIncludedTerm)
+}
+
+//
+// leadership transfer events.
+//
+
+// receive TransferLeader request from upper application.
+// cut down client operations.
+// wait until the transfer target catches up with the leader.
+// send TimeoutNow to the transfer target.
+// transfer target receives TimeoutNow and check if it's qualified to be the new leader.
+// if qualified, the transfer target sends a MsgHup to itself to start a new election immediately.
+// the current leader receives a RequestVote request from the transfer target
+// the current leader steps down if it thinks it's stale by comparing the terms.
+// the transfer target receives a quorum of votes and becomes the new leader.
+// the client operations are redirected to the new leader.
+// or the leadership transfering aborts due to transfer timer out. The old leader resumes client operations.
+
+func (l *Logger) recvTRAN(to uint64) {
+	r := l.r
+	l.printf(TRAN, "N%v <- TRANS (TE:%v)", r.id, to)
+}
+
+func (l *Logger) recvTNOW(m pb.Message) {
+	r := l.r
+	l.printf(TRAN, "N%v <- N%v TRANS (CI:%v LI:%v LT:%v)", r.id, m.From, m.Commit, m.Index, m.LogTerm)
+}
+
+func (l *Logger) leaderQualified() {
+	r := l.r
+	l.printf(TRAN, "N%v QLF", r.id)
+}
+
+func (l *Logger) transTimeout() {
+	r := l.r
+	l.printf(TRAN, "N%v TTO", r.id)
 }

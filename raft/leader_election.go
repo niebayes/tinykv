@@ -187,6 +187,7 @@ func (r *Raft) becomeLeader() {
 	r.resetPeerProgress()
 	r.State = StateLeader
 	r.Lead = r.id
+	r.leadTransferee = None
 
 	// upon becoming a new leader, broadcast a no-op entry to claim the leadership
 	// and keep other nodes' log in sync.

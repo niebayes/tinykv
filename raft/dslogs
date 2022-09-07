@@ -18,7 +18,7 @@ TOPICS = {
     "PEER": "#00813c",
     "PERS": "#d08341",
     "SNAP": "#FD971F",
-    # "DROP": "#398280",
+    "TRANS": "#398280",
 }
 # fmt: on
 
