@@ -33,6 +33,10 @@ type SoftState struct {
 	RaftState StateType
 }
 
+func (a *SoftState) equal(b *SoftState) bool {
+	return a.Lead == b.Lead && a.RaftState == b.RaftState
+}
+
 // Ready encapsulates the entries and messages that are ready to read,
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
@@ -74,6 +78,7 @@ type Ready struct {
 type RawNode struct {
 	Raft          *Raft
 	prevHardState pb.HardState
+	prevSoftState *SoftState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
@@ -82,6 +87,7 @@ func NewRawNode(cfg *Config) (*RawNode, error) {
 	rn := &RawNode{
 		Raft:          r,
 		prevHardState: r.hardState(),
+		prevSoftState: r.softState(),
 	}
 	return rn, nil
 }
@@ -170,6 +176,10 @@ func (rn *RawNode) Ready() Ready {
 		rd.Snapshot = *l.pendingSnapshot
 	}
 
+	if curSoftState := rn.Raft.softState(); !curSoftState.equal(rn.prevSoftState) {
+		rd.SoftState = curSoftState
+	}
+
 	// rn.Raft.Logger.ReadyCommittedEnts(rd.CommittedEntries)
 
 	return rd
@@ -183,10 +193,12 @@ func (rn *RawNode) Ready() Ready {
 // (5) if the hardstate needs to be updated.
 func (rn *RawNode) HasReady() bool {
 	l := rn.Raft.RaftLog
+	curSoftState := rn.Raft.softState()
 	curHardState := rn.Raft.hardState()
 	updatedHardState := !IsEmptyHardState(curHardState) && !isHardStateEqual(curHardState, rn.prevHardState)
 	return len(rn.Raft.msgs) > 0 || len(l.unstableEntries()) > 0 ||
-		len(l.nextEnts()) > 0 || l.hasPendingSnapshot() || updatedHardState
+		len(l.nextEnts()) > 0 || l.hasPendingSnapshot() ||
+		updatedHardState || !curSoftState.equal(rn.prevSoftState)
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the

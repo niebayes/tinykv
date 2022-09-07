@@ -8,10 +8,21 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 	r.Logger.recvTRAN(m.From)
 	// TransferLeader is a local msg which has term equals to 0, so don't drop it by comparing terms.
 
-	// there's a pending leader transfer task, ignore this msg.
-	if r.leadTransferee != None {
+	// FIXME: Shall a follower redirects TransferLeader?
+	// TODO: figure out which msgs shall be redirected to leader?
+	if r.State == StateFollower {
+		if r.Lead != None {
+			m.To = r.Lead
+			r.forwardMsgUp(m)
+		}
 		return
 	}
+
+	// the leadership transferring to node m.From is in progress, wait for a while.
+	if r.leadTransferee == m.From {
+		return
+	}
+	// start a new round of leadership transfer even when there's a pending transferring to another node.
 
 	// by convention, the upper application set m.From to the transfer target's id.
 	pr, ok := r.Prs[m.From]
@@ -21,16 +32,31 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 		return
 	}
 
+	// the transfer target is me and I am the leader, ignore this msg.
+	if m.From == r.id && r.State == StateLeader {
+		return
+	}
+
 	// start transfering. Proposal receiving is paused until this transfering is done or aborted.
 	r.leadTransferee = m.From
 	r.resetTransferTimer()
 
-	// if the transfer target already catched up with me, immediately send TimeoutNow msg.
-	l := r.RaftLog
-	if pr.Match >= l.committed {
+	// the transfer target is me and I am not the leader, and since I must have caught up with me.
+	// so immediately send TimeoutNow to myself.
+	if m.From == r.id && r.State != StateLeader {
 		r.sendTimeoutNow(m.From)
 	}
-	// otherwise, we have to wait for it catching up with me, or abort the transfering due to transfer time out.
+
+	// if the transfer target already catched up with me, immediately send TimeoutNow msg.
+	l := r.RaftLog
+	// FIXME: Shall I compare Match with commit index or last log index?
+	// etcd chooses the later one, but the raft phd paper seems suggests the former one.
+	if pr.Match >= l.committed {
+		r.sendTimeoutNow(m.From)
+	} else {
+		// otherwise, we have to wait for it catching up with me, or abort the transfering due to transfer time out.
+		r.sendAppendEntries(m.From, true)
+	}
 }
 
 func (r *Raft) sendTimeoutNow(to uint64) {
@@ -53,6 +79,15 @@ func (r *Raft) sendTimeoutNow(to uint64) {
 func (r *Raft) handleTimeoutNow(m pb.Message) {
 	r.Logger.recvTNOW(m)
 
+	// TODO: drop all msgs from nodes that not currently in the same raft group as me.
+	// FIXME: Is this reasonable? Shall a msg from another raft group steps down me?
+
+	// I was removed from the raft group, drop this msg.
+	// TODO: wrap to a helper function to be reused for others.
+	if _, ok := r.Prs[r.id]; !ok {
+		return
+	}
+
 	// drop stale msgs.
 	if m.Term < r.Term {
 		return
@@ -63,6 +98,9 @@ func (r *Raft) handleTimeoutNow(m pb.Message) {
 	// FIXME: will this term changing affects up-to-date log checking?
 	r.becomeFollower(m.From, m.Term)
 	r.resetElectionTimer()
+
+	// FIXME: Shall I do all of these check to prove my qualification?
+	// etcd does not do so.
 
 	// ensure I'm qualified to be the new leader:
 	// I have committed what leader committed.

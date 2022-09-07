@@ -312,7 +312,7 @@ func (r *Raft) stepFollower(msg pb.Message) {
 	case pb.MessageType_MsgSnapshot:
 		r.handleInstallSnapshot(msg)
 	case pb.MessageType_MsgTransferLeader:
-		// dropped.
+		r.handleTransferLeader(msg)
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleTimeoutNow(msg)
 	default:
@@ -344,8 +344,9 @@ func (r *Raft) stepCandidate(msg pb.Message) {
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(msg)
 	case pb.MessageType_MsgTransferLeader:
-		// dropped.
+		r.handleTransferLeader(msg)
 	case pb.MessageType_MsgTimeoutNow:
+		// FIXME: in etcd, candidates drops TransferLeader and TimeoutNow. Shall I also drop them?
 		r.handleTimeoutNow(msg)
 	default:
 		panic("invalid msg type")
@@ -399,5 +400,12 @@ func (r *Raft) hardState() pb.HardState {
 		Term:   r.Term,
 		Vote:   r.Vote,
 		Commit: r.RaftLog.committed,
+	}
+}
+
+func (r *Raft) softState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
 	}
 }

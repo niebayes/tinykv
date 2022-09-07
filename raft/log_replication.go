@@ -259,6 +259,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 
 	// if the from node is the current transfer target, and it catches up with me,
 	// send TimeoutNow to it immediately.
+	// FIXME: Shall I compares Match with commit index or last log index?
 	if m.From == r.leadTransferee && pr.Match >= l.committed {
 		r.sendTimeoutNow(m.From)
 	}
@@ -341,6 +342,8 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 
 	// if the from node is the current transfer target, and it catches up with me,
 	// send TimeoutNow to it immediately.
+	// FIXME: Shall I compares Match with commit index or last log index?
+	// FIXME: Shall I also check TimeoutNow sending condition right here?
 	if m.From == r.leadTransferee && pr.Match >= l.committed {
 		r.sendTimeoutNow(m.From)
 	}
@@ -483,6 +486,7 @@ func (r *Raft) maybeUpdateCommitIndex() bool {
 	return false
 }
 
+// TODO: elaborate the usage of must and remove it if it's unuseful.
 func (r *Raft) sendAppendEntries(to uint64, must bool) {
 	l := r.RaftLog
 	pr := r.Prs[to]

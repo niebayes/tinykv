@@ -1251,6 +1251,8 @@ func TestCommitAfterRemoveNode3A(t *testing.T) {
 		From:    2,
 		Index:   ccIndex,
 		Term:    r.Term,
+		// TODO: add a note that I modify this test.
+		NextIndex: ccIndex + 1,
 	})
 	ents := nextEnts(r, s)
 	if len(ents) != 2 {

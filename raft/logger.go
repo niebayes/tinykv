@@ -560,3 +560,17 @@ func (l *Logger) transTimeout() {
 	r := l.r
 	l.printf(TRAN, "N%v TTO", r.id)
 }
+
+//
+// config change events.
+//
+
+func (l *Logger) addNode(id uint64) {
+	r := l.r
+	l.printf(TRAN, "N%v +n N%v", r.id, id)
+}
+
+func (l *Logger) removeNode(id uint64) {
+	r := l.r
+	l.printf(TRAN, "N%v -n N%v", r.id, id)
+}

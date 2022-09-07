@@ -231,6 +231,16 @@ func (d *peerMsgHandler) processRaftCommand(ent eraftpb.Entry, cmd *raft_cmdpb.R
 	kvWB := new(engine_util.WriteBatch)
 	cmd_resp := newCmdResp()
 
+	if ent.EntryType == eraftpb.EntryType_EntryConfChange {
+		cc := eraftpb.ConfChange{}
+		if err := proto.Unmarshal(ent.Data, &cc); err != nil {
+			panic(err)
+		}
+		// TODO: persist conf state.
+		// FIXME: How to persist conf state?
+		d.RaftGroup.ApplyConfChange(cc)
+	}
+
 	needNewTxn := false
 	for _, request := range cmd.Requests {
 		if d.handleClientRequest(request, cmd_resp, kvWB) {
