@@ -416,7 +416,6 @@ func (d *peerMsgHandler) handleClientRequest(request *raft_cmdpb.Request, cmd_re
 			CmdType: raft_cmdpb.CmdType_Snap,
 			Snap:    resp,
 		})
-		// TODO: wrap these to a hint.
 		// when a client wishes to read the kv, the storage returns it a snapshot which is wrapped into
 		// a txn. So, we start a new txn here, and let the service handler discards the txn.
 		needNewTxn = true
