@@ -162,8 +162,6 @@ func (rn *RawNode) Ready() Ready {
 	rd.Entries = l.unstableEntries()
 	rd.CommittedEntries = l.nextEnts()
 	rd.Messages = rn.Raft.msgs
-	// be sure to empty the mailbox after retrieving.
-	// FIXME: Shall I empty the mailbox right here, or in Advance after the ready state are processed?
 	rn.Raft.msgs = rn.Raft.msgs[:0]
 	// to fit into the creepy tests.
 	if len(rd.Messages) == 0 {

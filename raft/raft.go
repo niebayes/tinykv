@@ -409,3 +409,20 @@ func (r *Raft) softState() *SoftState {
 		RaftState: r.State,
 	}
 }
+
+func (r *Raft) GetMostUpToDatePeerId() uint64 {
+	l := r.RaftLog
+	mostUpToDatePeerId := None
+	minMatchDiff := l.LastIndex() + 1
+	for id, pr := range r.Prs {
+		if id == r.id {
+			continue
+		}
+		matchDiff := l.LastIndex() - pr.Match
+		if matchDiff < minMatchDiff {
+			minMatchDiff = matchDiff
+			mostUpToDatePeerId = id
+		}
+	}
+	return mostUpToDatePeerId
+}

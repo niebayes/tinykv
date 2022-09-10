@@ -25,6 +25,8 @@ type router struct {
 	storeSender chan<- message.Msg
 }
 
+// TODO: figure out how router works and what data structures it maintains.
+
 // router is a conduit through which the store (a tiny-kv sever instance) communicates (using msgs)
 // with the raftstore.
 // the store sends msgs to the storeSender channel and raftstore fetches msgs from the storeReceiver channel.

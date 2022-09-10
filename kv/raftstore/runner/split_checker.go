@@ -45,6 +45,7 @@ func (r *splitCheckHandler) Handle(t worker.Task) {
 	log.Debugf("executing split check worker.Task: [regionId: %d, startKey: %s, endKey: %s]", regionId,
 		hex.EncodeToString(region.StartKey), hex.EncodeToString(region.EndKey))
 	key := r.splitCheck(regionId, region.StartKey, region.EndKey)
+	// key != nil iff region size > split size.
 	if key != nil {
 		_, userKey, err := codec.DecodeBytes(key)
 		if err == nil {
@@ -74,12 +75,14 @@ func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte)
 	txn := r.engine.NewTransaction(false)
 	defer txn.Discard()
 
+	// reset curSize and splitKey.
 	r.checker.reset()
 	it := engine_util.NewCFIterator(engine_util.CfDefault, txn)
 	defer it.Close()
 	for it.Seek(startKey); it.Valid(); it.Next() {
 		item := it.Item()
 		key := item.Key()
+		// scan keys in range [start key, end key)
 		if engine_util.ExceedEndKey(key, endKey) {
 			// update region size
 			r.router.Send(regionID, message.Msg{
@@ -88,6 +91,12 @@ func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte)
 			})
 			break
 		}
+		// accumulate len(key) + len(value) to curSize.
+		// if curSize > splitSize, record set split key to the current key, but do not terminate scan.
+		// since we need to update region size.
+		// if curSize > maxSize, terminate scan immediately.
+		// maxSize delimits that one round of scan won't last too long in that although the key range
+		// is small but the number of items in the range large.
 		if r.checker.onKv(key, item) {
 			break
 		}
