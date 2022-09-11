@@ -2,11 +2,14 @@ package raftstore
 
 import (
 	"fmt"
-	"github.com/pingcap-incubator/tinykv"
 	"log"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/pingcap-incubator/tinykv"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
 
 // true to turn on debugging/logging.
@@ -115,4 +118,40 @@ func (l *Logger) ScheduleCompactLog(peerId, truncatedIndex, truncatedTerm uint64
 
 func (l *Logger) UpdateTruncatedState(peerId, oldTruncatedIndex, oldTruncatedTerm, truncatedIndex, truncatedTerm uint64) {
 	l.printf(SNAP, "N%v ^ts (TI:%v TT:%v) -> (TI:%v TT:%v)", peerId, oldTruncatedIndex, oldTruncatedTerm, truncatedIndex, truncatedTerm)
+}
+
+var changeTypeMap = [...]string{
+	"AD", // add node.
+	"RE", // remove node.
+}
+
+func (l *Logger) RecvAdmin(id uint64, request *raft_cmdpb.AdminRequest) {
+	switch request.CmdType {
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		l.printf(PEER, "N%v <- LEAD (PI:%v SI:%v)", id, request.TransferLeader.Peer.Id, request.TransferLeader.Peer.StoreId)
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		l.printf(PEER, "N%v <- CLOG (CI:%v CT:%v)", id, request.CompactLog.CompactIndex, request.CompactLog.CompactTerm)
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		l.printf(PEER, "N%v <- CCHG (TP:%v PI:%v SI:%v)", id, changeTypeMap[request.ChangePeer.ChangeType], request.ChangePeer.Peer.Id, request.ChangePeer.Peer.StoreId)
+	case raft_cmdpb.AdminCmdType_Split:
+		l.printf(PEER, "N%v <- SPLT (SK:%v RI:%v ID:%v)", id, string(request.Split.SplitKey), request.Split.NewRegionId, request.Split.NewPeerIds)
+	default:
+		panic("unknown admin type")
+	}
+}
+
+func (l *Logger) AddPeer(id, peer_id uint64) {
+	l.printf(PEER, "N%v +p N%v", id, peer_id)
+}
+
+func (l *Logger) RemovePeer(id, peer_id uint64) {
+	l.printf(PEER, "N%v -p N%v", id, peer_id)
+}
+
+func (l *Logger) DestroyPeer(id, peer_id uint64) {
+	l.printf(PEER, "N%v !p N%v", id, peer_id)
+}
+
+func (l *Logger) UpdateEpoch(id, oldConfVer, oldVer uint64, curEpoch *metapb.RegionEpoch) {
+	l.printf(PEER, "N%v ^ep (CV:%v V:%v) -> (CV:%v V:%v)", id, oldConfVer, oldVer, curEpoch.ConfVer, curEpoch.Version)
 }

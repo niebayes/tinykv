@@ -579,6 +579,8 @@ func (r *Raft) tryUpdateCommitted(committed, lastNewEntryIndex uint64) {
 // FIXME: seems there's a bug in updating commit index and applied index.
 func (r *Raft) tryUpdateApplied(applied uint64) {
 	l := r.RaftLog
+	// FIXME: It seems this bug is raised due to updating applied index in handleInstallSnapshot.
+	// TODO: update it in peer msg handler.
 	if applied < l.applied || applied > l.committed {
 		panic("invariant: applied <= committed and applied never decreases.")
 	}

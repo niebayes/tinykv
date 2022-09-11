@@ -25,6 +25,9 @@ func (r *Raft) sendInstallSnapshot(to uint64) {
 		Snapshot: &snap,
 	})
 
+	pr := r.Prs[to]
+	pr.Next = max(pr.Next, snap.Metadata.Index+1)
+
 	r.Logger.sendSnap(to, &snap)
 }
 
@@ -49,7 +52,7 @@ func (r *Raft) handleInstallSnapshot(m pb.Message) {
 	r.becomeFollower(m.Term, m.From)
 	r.resetElectionTimer()
 
-	// TODO: check if this msg contains a snapshot and if it contains a snapshot 
+	// TODO: check if this msg contains a snapshot and if it contains a snapshot
 	// with key range overlaps with my key range. If it does overlap, reject this snapshot.
 
 	snap := m.Snapshot

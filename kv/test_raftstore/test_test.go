@@ -614,6 +614,7 @@ func TestBasicConfChange3B(t *testing.T) {
 
 	// add peer (3, 3) to region 1
 	cluster.MustAddPeer(1, NewPeer(3, 3))
+	// remove peer (2, 2) from region 1.
 	cluster.MustRemovePeer(1, NewPeer(2, 2))
 
 	cluster.MustPut([]byte("k3"), []byte("v3"))
@@ -626,6 +627,7 @@ func TestBasicConfChange3B(t *testing.T) {
 	MustGetNone(cluster.engines[2], []byte("k1"))
 	MustGetNone(cluster.engines[2], []byte("k2"))
 
+	// add peer (2, 2) to region 1.
 	cluster.MustAddPeer(1, NewPeer(2, 2))
 	MustGetEqual(cluster.engines[2], []byte("k1"), []byte("v1"))
 	MustGetEqual(cluster.engines[2], []byte("k2"), []byte("v2"))

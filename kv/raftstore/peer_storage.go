@@ -371,12 +371,14 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// even if it fails, as long as the snapshot is installed successfully,
 	// there would be no problem since these keys are stale keys, they would not affect
 	// the subsequent queries.
-	ps.clearExtraData(snapData.Region)
+	if ps.isInitialized() {
+		ps.clearExtraData(snapData.Region)
 
-	// clear stale metadata.
-	err := ps.clearMeta(kvWB, raftWB)
-	if err != nil {
-		return nil, err
+		// clear stale metadata.
+		err := ps.clearMeta(kvWB, raftWB)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	si := snapshot.Metadata.Index
@@ -390,16 +392,20 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// update raft state.
 	// TODO: update term only when term is changed.
 	// FIXME: Do I need to update these right here?
-	ps.raftState.HardState.Commit = max(ps.raftState.HardState.Commit, si)
 	// FIXME: Do I need to update these right here?
-	ps.raftState.LastIndex = max(ps.raftState.LastIndex, si)
-	ps.raftState.LastTerm = max(ps.raftState.LastTerm, st)
+	if si > ps.raftState.LastIndex {
+		ps.raftState.LastIndex = si
+		ps.raftState.LastTerm = st
+	}
+	ps.raftState.HardState.Commit = max(ps.raftState.HardState.Commit, si)
 	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
 
 	// update apply state.
 	// note, both log compaction and snapshotting need to truncate log, and hence need to update truncated state.
-	ps.applyState.TruncatedState.Index = max(ps.applyState.TruncatedState.Index, si)
-	ps.applyState.TruncatedState.Term = max(ps.applyState.TruncatedState.Term, st)
+	if si > ps.applyState.TruncatedState.Index {
+		ps.applyState.TruncatedState.Index = si
+		ps.applyState.TruncatedState.Term = st
+	}
 	ps.applyState.AppliedIndex = max(ps.applyState.AppliedIndex, si)
 	kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState)
 
