@@ -97,7 +97,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 		if siblingRegion != nil {
 			errEpochNotMatching.Regions = append(errEpochNotMatching.Regions, siblingRegion)
 		}
-		log.Infof("msg region <ConfVer:%v Ver:%v>  my region <ConfVer:%v Ver:%v", req.Header.RegionEpoch.ConfVer, req.Header.RegionEpoch.Version, d.Region().RegionEpoch.ConfVer, d.Region().RegionEpoch.Version)
+		// log.Panicf("msg region <ConfVer:%v Ver:%v>  my region <ConfVer:%v Ver:%v>", req.Header.RegionEpoch.ConfVer, req.Header.RegionEpoch.Version, d.Region().RegionEpoch.ConfVer, d.Region().RegionEpoch.Version)
 		return errEpochNotMatching
 	}
 	return err

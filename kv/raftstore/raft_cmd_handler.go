@@ -144,9 +144,19 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	// persist ready states.
 	// TODO: handle applySnapResult.
-	_, err := d.peerStorage.SaveReadyState(&rd, rn.Raft)
+	applySnapResult, err := d.peerStorage.SaveReadyState(&rd, rn.Raft)
 	if err != nil {
 		panic(err)
+	}
+	if applySnapResult != nil {
+		storeMeta := d.ctx.storeMeta
+		storeMeta.Lock()
+		region := applySnapResult.Region
+		d.peerStorage.SetRegion(region)
+		storeMeta.regions[region.Id] = region
+		storeMeta.regionRanges.Delete(&regionItem{region: applySnapResult.PrevRegion})
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
+		storeMeta.Unlock()
 	}
 
 	// send pending raft msgs to other peers.

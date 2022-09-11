@@ -412,6 +412,8 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// update region state.
 	// note, ps.region and peer state are not modified inside this function.
 	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+	log.Infof("restore region from snapshot (CV:%v V:%v) -> (CV:%v V:%v)", ps.Region().RegionEpoch.ConfVer,
+		ps.region.RegionEpoch.Version, snapData.Region.RegionEpoch.ConfVer, snapData.Region.RegionEpoch.Version)
 
 	// Now the snapshot is applied.
 	applySnapResult := &ApplySnapResult{

@@ -144,7 +144,7 @@ func NewNodeSimulator(schedulerClient scheduler_client.Client) *NodeSimulator {
 	}
 }
 
-// create and run a store under the context cts,
+// create and run a store under the context ctx,
 // and use the given engine as the back engine.
 func (c *NodeSimulator) RunStore(cfg *config.Config, engine *engine_util.Engines, ctx context.Context) error {
 	c.Lock()
