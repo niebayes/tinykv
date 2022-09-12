@@ -7,6 +7,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
@@ -143,11 +144,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	rd := rn.Ready()
 
 	// persist ready states.
-	// TODO: handle applySnapResult.
-	applySnapResult, err := d.peerStorage.SaveReadyState(&rd, rn.Raft)
-	if err != nil {
-		panic(err)
-	}
+	applySnapResult := d.peerStorage.SaveReadyState(&rd, rn.Raft)
 	if applySnapResult != nil {
 		storeMeta := d.ctx.storeMeta
 		storeMeta.Lock()
@@ -429,6 +426,7 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 		region.RegionEpoch.ConfVer++
 		region.Peers = append(region.Peers, request.Peer)
 		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+		log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
 		if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
 			panic(err)
 		}
@@ -471,6 +469,7 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 		}
 		region.Peers = newPeers
 		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+		log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
 		if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
 			panic(err)
 		}
@@ -578,6 +577,11 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 	meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
 	meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
 
+	// TODO: rewrite logger by taking region id into account.
+
+	log.Infof("N%v R%v old region state key: %v", d.PeerId(), region.Id, meta.RegionStateKey(region.Id))
+	log.Infof("N%v R%v new region state key: %v", d.PeerId(), newRegion.Id, meta.RegionStateKey(newRegion.Id))
+
 	// change on region metadata and store metadata must be persisted before we create the peer.
 	if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
 		panic(err)
@@ -590,11 +594,15 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 		panic(err)
 	}
 
+	logger.RegionSplit(d.PeerId(), newRegion, peer)
+
 	// register the peer to router.
 	d.ctx.router.register(peer)
 
 	// send a MsgTypeStart to the peer. Upon receiving, the peer will start ticker and all its work starts.
-	d.ctx.router.send(newRegion.Id, message.Msg{RegionID: newRegion.Id, Type: message.MsgTypeStart})
+	if err = d.ctx.router.send(newRegion.Id, message.Msg{RegionID: newRegion.Id, Type: message.MsgTypeStart}); err != nil {
+		panic(err)
+	}
 
 	if d.IsLeader() {
 		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)

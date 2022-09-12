@@ -210,6 +210,7 @@ func (p *peer) Destroy(engine *engine_util.Engines, keepData bool) error {
 		return err
 	}
 	meta.WriteRegionState(kvWB, region, rspb.PeerState_Tombstone)
+	log.Infof("destory region state key: %v",  meta.RegionStateKey(region.Id))
 	// write kv rocksdb first in case of restart happen between two write
 	if err := kvWB.WriteToDB(engine.Kv); err != nil {
 		return err

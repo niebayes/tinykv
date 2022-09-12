@@ -155,3 +155,8 @@ func (l *Logger) DestroyPeer(id, peer_id uint64) {
 func (l *Logger) UpdateEpoch(id, oldConfVer, oldVer uint64, curEpoch *metapb.RegionEpoch) {
 	l.printf(PEER, "N%v ^ep (CV:%v V:%v) -> (CV:%v V:%v)", id, oldConfVer, oldVer, curEpoch.ConfVer, curEpoch.Version)
 }
+
+func (l *Logger) RegionSplit(id uint64, region *metapb.Region, peer *peer) {
+	l.printf(PEER, "N%v SPLIT N%v (RI:%v SK:%v EK:%v CV:%v V:%v)", id, peer.PeerId(),
+		region.Id, string(region.StartKey), string(region.EndKey), region.RegionEpoch.ConfVer, region.RegionEpoch.Version)
+}

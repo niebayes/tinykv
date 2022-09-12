@@ -387,7 +387,7 @@ func (l *Logger) recvHBET(m pb.Message) {
 func (l *Logger) restoreEnts(ents []pb.Entry) {
 	r := l.r
 	l.printf(PERS, "N%v re (LN:%v)", r.id, len(ents))
-	l.printEnts(PERS, r.id, ents)
+	// l.printEnts(PERS, r.id, ents)
 }
 
 func (l *Logger) restoreHardState(hardState *pb.HardState) {
