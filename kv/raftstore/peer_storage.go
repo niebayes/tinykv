@@ -466,7 +466,6 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready, r *raft.Raft) *ApplySna
 
 	raftWB.MustWriteToDB(ps.Engines.Raft)
 	kvWB.MustWriteToDB(ps.Engines.Kv)
-	ps.regionStateKeyCheck()
 
 	// TODO: rewrite logging.
 	if oldLastStabledIndex != ps.raftState.LastIndex {
@@ -489,24 +488,4 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 		StartKey: start,
 		EndKey:   end,
 	}
-}
-
-func (d *PeerStorage) regionStateKeyCheck() {
-	startKey := meta.RegionMetaMinKey
-	endKey := meta.RegionMetaMaxKey
-	kvEngine := d.Engines.Kv
-
-	kvEngine.View(func(txn *badger.Txn) error {
-		// get all regions from RegionLocalState
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		for it.Seek(startKey); it.Valid(); it.Next() {
-			item := it.Item()
-			if bytes.Compare(item.Key(), endKey) >= 0 {
-				break
-			}
-			meta.DecodeRegionMetaKey(item.Key())
-		}
-		return nil
-	})
 }

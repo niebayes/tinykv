@@ -107,6 +107,26 @@ type Transport interface {
 /// loadPeers loads peers in this store. It scans the db engine, loads all regions and their peers from it
 /// WARN: This store should not be used before initialized.
 func (bs *Raftstore) loadPeers() ([]*peer, error) {
+	{
+		startKey := meta.RegionMetaMinKey
+		endKey := meta.RegionMetaMaxKey
+		kvEngine := bs.ctx.engine.Kv
+
+		kvEngine.View(func(txn *badger.Txn) error {
+			// get all regions from RegionLocalState
+			it := txn.NewIterator(badger.DefaultIteratorOptions)
+			defer it.Close()
+			for it.Seek(startKey); it.Valid(); it.Next() {
+				item := it.Item()
+				if bytes.Compare(item.Key(), endKey) >= 0 {
+					break
+				}
+				meta.DecodeRegionMetaKey(item.Key())
+			}
+			return nil
+		})
+	}
+
 	// Scan region meta to get saved regions.
 	startKey := meta.RegionMetaMinKey
 	endKey := meta.RegionMetaMaxKey

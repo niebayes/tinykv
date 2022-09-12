@@ -28,6 +28,17 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 
+	// if the key is not in the region, drop these client requests.
+	for _, request := range msg.Requests {
+		key := getKey(request)
+		if key != nil {
+			if err := util.CheckKeyInRegion(key, d.Region()); err != nil {
+				callbackDoneWithErr(cb, err)
+				return
+			}
+		}
+	}
+
 	// if the split key is not in the region, drop this split request
 	if isSplitAdmin(msg) {
 		if err := util.CheckKeyInRegion(msg.AdminRequest.Split.SplitKey, d.Region()); err != nil {
@@ -211,6 +222,9 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 	// response. If it receives a command whose serial number has already been executed, it responds
 	// immediately without re-executing the request.
 
+	// FIXME: small granularity of write batch or large granularity? Large for grouping updates of related data in one batch
+	// and to ensure crash consistency.
+
 	// record old raft state for logging.
 	applyState := d.peerStorage.applyState
 	oldTruncatedIndex := applyState.TruncatedState.Index
@@ -218,7 +232,6 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 	oldAppliedIndex := applyState.AppliedIndex
 
 	cmd_resp := newCmdResp()
-	kvWB := new(engine_util.WriteBatch)
 
 	if ent.EntryType == eraftpb.EntryType_EntryConfChange {
 		d.handleChangePeer(ent, cmd_resp)
@@ -238,6 +251,7 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 		}
 
 		// handle client requests.
+		kvWB := new(engine_util.WriteBatch)
 		for _, request := range cmd.Requests {
 			key := getKey(request)
 			if key != nil {
@@ -250,6 +264,9 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 				needNewTxn = true
 			}
 		}
+		if cmd_resp.Header.Error == nil && kvWB.Len() > 0 {
+			kvWB.MustWriteToDB(d.ctx.engine.Kv)
+		}
 
 		// handle admin requests.
 		if cmd.AdminRequest != nil {
@@ -257,7 +274,7 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 			case raft_cmdpb.AdminCmdType_CompactLog:
 				d.handleCompactLog(cmd.AdminRequest.CompactLog)
 			case raft_cmdpb.AdminCmdType_Split:
-				d.handleSplit(cmd, cmd_resp, kvWB)
+				d.handleSplit(cmd, cmd_resp)
 			case raft_cmdpb.AdminCmdType_TransferLeader, raft_cmdpb.AdminCmdType_ChangePeer:
 				panic("shall not reach here")
 			default:
@@ -267,10 +284,7 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 	}
 
 	// advance and persist apply index.
-	d.updateApplyState(ent.Index, kvWB)
-
-	kvWB.MustWriteToDB(d.ctx.engine.Kv)
-	d.peerStorage.regionStateKeyCheck()
+	d.updateApplyState(ent.Index)
 
 	if oldTruncatedIndex != applyState.TruncatedState.Index {
 		logger.UpdateTruncatedState(d.PeerId(), oldTruncatedIndex, oldTruncatedTerm,
@@ -362,7 +376,6 @@ func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest)
 		kvWB := new(engine_util.WriteBatch)
 		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
 		kvWB.MustWriteToDB(d.ctx.engine.Kv)
-		d.peerStorage.regionStateKeyCheck()
 
 		d.ScheduleCompactLog(applyState.TruncatedState.Index)
 		// TODO: add logging for the begin and end of log compaction.
@@ -388,8 +401,13 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 		panic(err)
 	}
 
-	if err := util.CheckRegionEpoch(&cmd, d.Region(), false); err != nil {
-		BindRespError(cmd_resp, err)
+	err := util.CheckRegionEpoch(&cmd, d.Region(), true)
+	if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
+		siblingRegion := d.findSiblingRegion()
+		if siblingRegion != nil {
+			errEpochNotMatching.Regions = append(errEpochNotMatching.Regions, siblingRegion)
+		}
+		BindRespError(cmd_resp, errEpochNotMatching)
 		return
 	}
 
@@ -420,7 +438,6 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 
 		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
 		kvWB.MustWriteToDB(d.ctx.engine.Kv)
-		d.peerStorage.regionStateKeyCheck()
 
 		log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
 		logger.AddPeer(d.PeerId(), request.Peer.Id)
@@ -457,7 +474,6 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 
 			meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
 			kvWB.MustWriteToDB(d.ctx.engine.Kv)
-			d.peerStorage.regionStateKeyCheck()
 
 			log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
 			logger.RemovePeer(d.PeerId(), request.Peer.Id)
@@ -482,7 +498,7 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 	}
 }
 
-func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_resp *raft_cmdpb.RaftCmdResponse) {
 	// TODO: add logging for the begin and end of a split.
 
 	if !d.checkSplitCondition(cmd_req, cmd_resp) {
@@ -491,6 +507,7 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 
 	region := d.Region()
 	request := cmd_req.AdminRequest.Split
+	kvWB := new(engine_util.WriteBatch)
 
 	// create the new region. The Peers field in region are the metadata of peers in the region.
 	newRegion := d.createRegion(request.NewRegionId, request.NewPeerIds, request.SplitKey, region.EndKey)
@@ -528,7 +545,6 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 
 	// change on region metadata and store metadata must be persisted before we create the peer.
 	kvWB.MustWriteToDB(d.ctx.engine.Kv)
-	d.peerStorage.regionStateKeyCheck()
 
 	// creata the peer responsible for the new region in this store. Peers for the new region in other stores
 	// will be created when they execute the same split request.
@@ -569,6 +585,7 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 
 func (d *peerMsgHandler) handleClientRequest(request *raft_cmdpb.Request, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) bool {
 	needNewTxn := false
+
 	switch request.CmdType {
 	case raft_cmdpb.CmdType_Get:
 		// FIXME: Does tinykv implement this mechanism? If yes, where?
@@ -667,11 +684,9 @@ func callbackDoneWithErr(cb *message.Callback, err error) {
 
 // since a no-op entry has no data, we only needs to advance the applied index.
 func (d *peerMsgHandler) processNoopEntry(ent eraftpb.Entry) {
-	kvWB := new(engine_util.WriteBatch)
 	applyState := d.peerStorage.applyState
 	oldAppliedIndex := applyState.AppliedIndex
-	d.updateApplyState(ent.Index, kvWB)
-	kvWB.MustWriteToDB(d.ctx.engine.Kv)
+	d.updateApplyState(ent.Index)
 	// FIXME: Seems error occurs here.
 	if oldAppliedIndex != applyState.AppliedIndex {
 		d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
@@ -679,11 +694,13 @@ func (d *peerMsgHandler) processNoopEntry(ent eraftpb.Entry) {
 	d.RaftGroup.Raft.Logger.ProcessedPropNoop(ent.Index)
 }
 
-func (d *peerMsgHandler) updateApplyState(index uint64, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) updateApplyState(index uint64) {
 	// advance and persist apply index.
 	applyState := d.peerStorage.applyState
 	applyState.AppliedIndex = max(applyState.AppliedIndex, index)
+	kvWB := new(engine_util.WriteBatch)
 	kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+	kvWB.MustWriteToDB(d.ctx.engine.Kv)
 }
 
 func (d *peerMsgHandler) createRegion(id uint64, peer_ids []uint64, startKey, endKey []byte) *metapb.Region {
@@ -754,8 +771,13 @@ func (d *peerMsgHandler) checkSplitCondition(cmd_req *raft_cmdpb.RaftCmdRequest,
 	// region epoch contains conf ver and version which may be changed due to
 	// conf change and region split/merge. If any happened, then the key range or peer
 	// config may be changed and hence this request is regarded stale and hence shall be rejected.
-	if err := util.CheckRegionEpoch(cmd_req, region, false); err != nil {
-		BindRespError(cmd_resp, err)
+	err := util.CheckRegionEpoch(cmd_req, region, true)
+	if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
+		siblingRegion := d.findSiblingRegion()
+		if siblingRegion != nil {
+			errEpochNotMatching.Regions = append(errEpochNotMatching.Regions, siblingRegion)
+		}
+		BindRespError(cmd_resp, errEpochNotMatching)
 		return false
 	}
 
