@@ -218,6 +218,7 @@ func (p *peer) Destroy(engine *engine_util.Engines, keepData bool) error {
 	if err := raftWB.WriteToDB(engine.Raft); err != nil {
 		return err
 	}
+	p.peerStorage.regionStateKeyCheck()
 
 	if p.peerStorage.isInitialized() && !keepData {
 		// If we meet panic when deleting data and raft log, the dirty data

@@ -270,6 +270,7 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 	d.updateApplyState(ent.Index, kvWB)
 
 	kvWB.MustWriteToDB(d.ctx.engine.Kv)
+	d.peerStorage.regionStateKeyCheck()
 
 	if oldTruncatedIndex != applyState.TruncatedState.Index {
 		logger.UpdateTruncatedState(d.PeerId(), oldTruncatedIndex, oldTruncatedTerm,
@@ -361,6 +362,7 @@ func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest)
 		kvWB := new(engine_util.WriteBatch)
 		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
 		kvWB.MustWriteToDB(d.ctx.engine.Kv)
+		d.peerStorage.regionStateKeyCheck()
 
 		d.ScheduleCompactLog(applyState.TruncatedState.Index)
 		// TODO: add logging for the begin and end of log compaction.
@@ -418,6 +420,7 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 
 		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
 		kvWB.MustWriteToDB(d.ctx.engine.Kv)
+		d.peerStorage.regionStateKeyCheck()
 
 		log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
 		logger.AddPeer(d.PeerId(), request.Peer.Id)
@@ -454,6 +457,7 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 
 			meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
 			kvWB.MustWriteToDB(d.ctx.engine.Kv)
+			d.peerStorage.regionStateKeyCheck()
 
 			log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
 			logger.RemovePeer(d.PeerId(), request.Peer.Id)
@@ -524,6 +528,7 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 
 	// change on region metadata and store metadata must be persisted before we create the peer.
 	kvWB.MustWriteToDB(d.ctx.engine.Kv)
+	d.peerStorage.regionStateKeyCheck()
 
 	// creata the peer responsible for the new region in this store. Peers for the new region in other stores
 	// will be created when they execute the same split request.
@@ -666,10 +671,7 @@ func (d *peerMsgHandler) processNoopEntry(ent eraftpb.Entry) {
 	applyState := d.peerStorage.applyState
 	oldAppliedIndex := applyState.AppliedIndex
 	d.updateApplyState(ent.Index, kvWB)
-	err := kvWB.WriteToDB(d.ctx.engine.Kv)
-	if err != nil {
-		panic(err)
-	}
+	kvWB.MustWriteToDB(d.ctx.engine.Kv)
 	// FIXME: Seems error occurs here.
 	if oldAppliedIndex != applyState.AppliedIndex {
 		d.RaftGroup.Raft.Logger.UpdateApplyState(oldAppliedIndex, applyState.AppliedIndex)
