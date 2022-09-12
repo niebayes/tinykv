@@ -143,16 +143,15 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	rd := rn.Ready()
 
-	// persist ready states.
+	// persist ready states and install snapshot.
 	applySnapResult := d.peerStorage.SaveReadyState(&rd, rn.Raft)
 	if applySnapResult != nil {
 		storeMeta := d.ctx.storeMeta
 		storeMeta.Lock()
 		region := applySnapResult.Region
-		d.peerStorage.SetRegion(region)
 		storeMeta.regions[region.Id] = region
-		storeMeta.regionRanges.Delete(&regionItem{region: applySnapResult.PrevRegion})
 		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
+		d.peerStorage.SetRegion(region)
 		storeMeta.Unlock()
 	}
 
@@ -161,7 +160,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	// execute committed raft cmds.
 	for _, ent := range rd.CommittedEntries {
-		// exit if the peer was stopped during executing the committed entries.
+		// exit if the peer was stopped during executing committed entries.
 		if d.stopped {
 			return
 		}
@@ -172,14 +171,12 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		// each raft log entry corresponds to one raft cmd which may contain multiple requests.
 		d.processLogEntry(ent)
 	}
-	if d.stopped {
-		return
+
+	// do not advance raft state if stopped.
+	if !d.stopped {
+		// notify the raft module that all ready state are handled.
+		rn.Advance(rd)
 	}
-
-	// FIXME: what if peer crashes right here?
-
-	// notify the raft module that all ready state are processed.
-	rn.Advance(rd)
 }
 
 // process a committed log entry.
@@ -225,7 +222,7 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 
 	if ent.EntryType == eraftpb.EntryType_EntryConfChange {
 		d.handleChangePeer(ent, cmd_resp)
-		// since this peer may be destroy due to a change peer cmd, this peer shall not
+		// since this peer may be destroy due to processing a change peer cmd, this peer shall not
 		// continue processing.
 		if d.stopped {
 			return
@@ -272,10 +269,7 @@ func (d *peerMsgHandler) processLogEntry(ent eraftpb.Entry) {
 	// advance and persist apply index.
 	d.updateApplyState(ent.Index, kvWB)
 
-	// apply the batch of writes.
-	if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
-		panic(err)
-	}
+	kvWB.MustWriteToDB(d.ctx.engine.Kv)
 
 	if oldTruncatedIndex != applyState.TruncatedState.Index {
 		logger.UpdateTruncatedState(d.PeerId(), oldTruncatedIndex, oldTruncatedTerm,
@@ -350,9 +344,12 @@ func (d *peerMsgHandler) finishProposal(ent eraftpb.Entry, cmd_resp *raft_cmdpb.
 //
 
 func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest) {
-	// update truncated state.
 	applyState := d.peerStorage.applyState
-	if applyState.TruncatedState.Index < request.CompactIndex {
+	// update truncated state.
+	// FIXME: Is this really possible to happen?
+	// note, if CompactIndex == TruncatedState.Index, we still need to update truncated term
+	// since we never reject this log compaction request and truncated term may be overwritten.
+	if applyState.TruncatedState.Index <= request.CompactIndex {
 		applyState.TruncatedState.Index = request.CompactIndex
 		applyState.TruncatedState.Term = request.CompactTerm
 
@@ -363,11 +360,10 @@ func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest)
 		// but the apply state is the stale one, and hence there's an inconsistency.
 		kvWB := new(engine_util.WriteBatch)
 		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
-		if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
-			panic(err)
-		}
+		kvWB.MustWriteToDB(d.ctx.engine.Kv)
 
 		d.ScheduleCompactLog(applyState.TruncatedState.Index)
+		// TODO: add logging for the begin and end of log compaction.
 		logger.ScheduleCompactLog(d.PeerId(), applyState.TruncatedState.Index, applyState.TruncatedState.Term)
 	}
 }
@@ -390,9 +386,8 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 		panic(err)
 	}
 
-	// reject stale conf change cmd.
-	region := d.Region()
-	if util.IsEpochStale(cmd.Header.RegionEpoch, region.RegionEpoch) {
+	if err := util.CheckRegionEpoch(&cmd, d.Region(), false); err != nil {
+		BindRespError(cmd_resp, err)
 		return
 	}
 
@@ -401,109 +396,74 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 	request := cmd.AdminRequest.ChangePeer
 	switch request.ChangeType {
 	case eraftpb.ConfChangeType_AddNode:
-		// FIXME: Is this strategy enough?
-		// check the existence of peer to de-duplicate duplication of the same config change cmds.
-		exist := false
-		for _, p := range region.Peers {
-			// the peer already is in the raft group.
-			if p.Id == request.Peer.Id && p.StoreId == request.Peer.StoreId {
-				exist = true
-			}
-		}
-		if exist {
+		// check the existence of peer to de-duplicate config change cmds.
+		region := d.Region()
+		if isPeerInRegion(request.Peer.Id, request.Peer.StoreId, region) {
 			return
 		}
 
-		// update region state.
+		// TODO: elaborate this process.
 		// the next round of heartbeat will try to access the new added peer,
 		// and the store worker would try to create a peer instance for this peer
 		// by calling `maybeCreatePeer`. If this call succeeds, the new added peer
 		// will start its work.
-		storeMeta := d.ctx.storeMeta
-		storeMeta.Lock()
+
+		// for logging.
 		oldConfVer := region.RegionEpoch.ConfVer
 		oldVer := region.RegionEpoch.Version
+
 		region.RegionEpoch.ConfVer++
 		region.Peers = append(region.Peers, request.Peer)
-		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
-		log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
-		if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
-			panic(err)
-		}
-		// update store meta till the region metadata is persisted.
-		// since some methods of StoreMeta require this, I choose to follow them.
-		storeMeta.regions[region.Id] = region
-		// FIXME: this update seems unnecessary.
-		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
-		storeMeta.Unlock()
-
 		d.insertPeerCache(request.Peer)
 
+		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+		kvWB.MustWriteToDB(d.ctx.engine.Kv)
+
+		log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
 		logger.AddPeer(d.PeerId(), request.Peer.Id)
 		logger.UpdateEpoch(d.PeerId(), oldConfVer, oldVer, region.RegionEpoch)
 
 	case eraftpb.ConfChangeType_RemoveNode:
-		// TODO: Handle duplicate remove node config change cmd.
-
 		// ensure the peer to be removed is in the region currently.
-		i := d.PeerId()
-		i++
-		exist := false
-		for _, p := range region.Peers {
-			if p.Id == request.Peer.Id && p.StoreId == request.Peer.StoreId {
-				exist = true
-			}
-		}
-		if !exist {
+		region := d.Region()
+		if !isPeerInRegion(request.Peer.Id, request.Peer.StoreId, region) {
 			return
 		}
 
-		oldConfVer := region.RegionEpoch.ConfVer
-		oldVer := region.RegionEpoch.Version
-		region.RegionEpoch.ConfVer++
-		newPeers := make([]*metapb.Peer, 0)
-		for _, p := range region.Peers {
-			if p.Id != request.Peer.Id || p.StoreId != request.Peer.StoreId {
-				newPeers = append(newPeers, p)
-			}
-		}
-		region.Peers = newPeers
-		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
-		log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
-		if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
-			panic(err)
-		}
-		d.removePeerCache(request.Peer.Id)
-
-		logger.RemovePeer(d.PeerId(), request.Peer.Id)
-		logger.UpdateEpoch(d.PeerId(), oldConfVer, oldVer, region.RegionEpoch)
-
-		if d.PeerId() == request.Peer.Id && d.storeID() == request.Peer.StoreId {
-			// if this peer is the current leader, transfer leadership to another peer at first.
-			// for d.IsLeader() && len(d.peerCache) > 1 {
-			// 	for _, p := range d.peerCache {
-			// 		if p.Id != d.PeerId() {
-			// 			d.RaftGroup.TransferLeader(p.Id)
-			// 		}
-			// 		time.Sleep(500 * time.Millisecond)
-			// 		if !d.IsLeader() || d.stopped {
-			// 			break
-			// 		}
-			// 	}
-			// }
-
-			// storeMeta will be updated inside destroyPeer.
+		// the node to be removed is me.
+		if request.Peer.Id == d.PeerId() && request.Peer.StoreId == d.storeID() {
+			// note, storeMeta will be updated inside destroyPeer.
+			// TODO: properly handle the case I'm the leader.
 			d.destroyPeer()
 
 			logger.DestroyPeer(d.PeerId(), request.Peer.Id)
+
+		} else {
+			oldConfVer := region.RegionEpoch.ConfVer
+			oldVer := region.RegionEpoch.Version
+
+			region.RegionEpoch.ConfVer++
+			newPeers := make([]*metapb.Peer, 0)
+			for _, p := range region.Peers {
+				if p.Id != request.Peer.Id || p.StoreId != request.Peer.StoreId {
+					newPeers = append(newPeers, p)
+				}
+			}
+			region.Peers = newPeers
+			d.removePeerCache(request.Peer.Id)
+
+			meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
+			kvWB.MustWriteToDB(d.ctx.engine.Kv)
+
+			log.Infof("region state key: %v", meta.RegionStateKey(region.Id))
+			logger.RemovePeer(d.PeerId(), request.Peer.Id)
+			logger.UpdateEpoch(d.PeerId(), oldConfVer, oldVer, region.RegionEpoch)
 		}
 
 	default:
 		panic("unknown change type")
 	}
 
-	// TODO: persist conf state.
-	// FIXME: How to persist conf state? And do I need to persist it?
 	d.RaftGroup.ApplyConfChange(cc)
 
 	if d.IsLeader() {
@@ -519,33 +479,14 @@ func (d *peerMsgHandler) handleChangePeer(ent eraftpb.Entry, cmd_resp *raft_cmdp
 }
 
 func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_resp *raft_cmdpb.RaftCmdResponse, kvWB *engine_util.WriteBatch) {
+	// TODO: add logging for the begin and end of a split.
+
+	if !d.checkSplitCondition(cmd_req, cmd_resp) {
+		return
+	}
+
 	region := d.Region()
 	request := cmd_req.AdminRequest.Split
-
-	// validate the request is not stale due to region epoch change.
-	// region epoch contains conf ver and version which may be changed due to
-	// conf change and region split/merge. If any happened, then the key range or peer
-	// config may be changed and hence this request is regarded stale and hence shall be rejected.
-	if err := util.CheckRegionEpoch(cmd_req, region, false); err != nil {
-		BindRespError(cmd_resp, err)
-		return
-	}
-
-	// validate the request is not stale due to peers change.
-	// in AskSplit, the scheduler assumes that the new region initially has the same #peers as the
-	// old region, so it allocates exactly #peer ids as the #peers.
-	// if however the region was splitted or mergerd before applying this split request, then this split
-	// request is regarded stale and hence shall be ignored.
-	if len(region.Peers) != len(request.NewPeerIds) {
-		BindRespError(cmd_resp, &util.ErrStaleCommand{})
-		return
-	}
-
-	// ensure the split key is still in my key range.
-	if err := util.CheckKeyInRegion(request.SplitKey, region); err != nil {
-		BindRespError(cmd_resp, err)
-		return
-	}
 
 	// create the new region. The Peers field in region are the metadata of peers in the region.
 	newRegion := d.createRegion(request.NewRegionId, request.NewPeerIds, request.SplitKey, region.EndKey)
@@ -561,12 +502,11 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 	if engine_util.ExceedEndKey(region.StartKey, region.EndKey) {
 		panic("start key goes over end key")
 	}
+
 	oldConfVer := region.RegionEpoch.ConfVer
 	oldVer := region.RegionEpoch.Version
-	region.RegionEpoch.Version++
 
-	// update store metadata of the old region.
-	storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
+	region.RegionEpoch.Version++
 
 	// add in store metadata of the new region.
 	storeMeta.regions[newRegion.Id] = newRegion
@@ -583,9 +523,7 @@ func (d *peerMsgHandler) handleSplit(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_res
 	log.Infof("N%v R%v new region state key: %v", d.PeerId(), newRegion.Id, meta.RegionStateKey(newRegion.Id))
 
 	// change on region metadata and store metadata must be persisted before we create the peer.
-	if err := kvWB.WriteToDB(d.ctx.engine.Kv); err != nil {
-		panic(err)
-	}
+	kvWB.MustWriteToDB(d.ctx.engine.Kv)
 
 	// creata the peer responsible for the new region in this store. Peers for the new region in other stores
 	// will be created when they execute the same split request.
@@ -747,6 +685,10 @@ func (d *peerMsgHandler) updateApplyState(index uint64, kvWB *engine_util.WriteB
 }
 
 func (d *peerMsgHandler) createRegion(id uint64, peer_ids []uint64, startKey, endKey []byte) *metapb.Region {
+	if engine_util.ExceedEndKey(startKey, endKey) {
+		panic("start key goes over end key")
+	}
+
 	newRegion := &metapb.Region{
 		Id:       id,
 		StartKey: startKey,
@@ -780,4 +722,56 @@ func getKey(request *raft_cmdpb.Request) []byte {
 		panic("unknown client request")
 	}
 	return nil
+}
+
+func isPeerInRegion(peerId, peerStoreId uint64, region *metapb.Region) bool {
+	for _, p := range region.Peers {
+		if p.Id == peerId && p.StoreId == peerStoreId {
+			return true
+		}
+	}
+	return false
+}
+
+// check if this split request is reasonable.
+func (d *peerMsgHandler) checkSplitCondition(cmd_req *raft_cmdpb.RaftCmdRequest, cmd_resp *raft_cmdpb.RaftCmdResponse) bool {
+	region := d.Region()
+	request := cmd_req.AdminRequest.Split
+
+	// the region this peer responsible for is changed.
+	if cmd_req.Header.RegionId != region.Id {
+		BindRespError(cmd_resp, &util.ErrRegionNotFound{})
+		return false
+	}
+
+	if request.NewRegionId == region.Id {
+		panic("new region id == region id")
+	}
+
+	// validate the request is not stale due to region epoch change.
+	// region epoch contains conf ver and version which may be changed due to
+	// conf change and region split/merge. If any happened, then the key range or peer
+	// config may be changed and hence this request is regarded stale and hence shall be rejected.
+	if err := util.CheckRegionEpoch(cmd_req, region, false); err != nil {
+		BindRespError(cmd_resp, err)
+		return false
+	}
+
+	// validate the request is not stale due to peers change.
+	// in AskSplit, the scheduler assumes that the new region initially has the same #peers as the
+	// old region, so it allocates exactly #peer ids as the #peers.
+	// if however the region was splitted or mergerd before applying this split request, then this split
+	// request is regarded stale and hence shall be ignored.
+	if len(region.Peers) != len(request.NewPeerIds) {
+		BindRespError(cmd_resp, &util.ErrStaleCommand{})
+		return false
+	}
+
+	// ensure the split key is still in my key range.
+	if err := util.CheckKeyInRegion(request.SplitKey, region); err != nil {
+		BindRespError(cmd_resp, err)
+		return false
+	}
+
+	return true
 }

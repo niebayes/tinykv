@@ -370,13 +370,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		StartKey: ps.region.StartKey,
 		EndKey:   ps.region.EndKey,
 	}
-	// ps.regionSched <- &runner.RegionTaskApply{
-	// 	RegionId: snapData.Region.Id,
-	// 	Notifier: notifier,
-	// 	SnapMeta: snapshot.Metadata,
-	// 	StartKey: snapData.Region.StartKey,
-	// 	EndKey:   snapData.Region.EndKey,
-	// }
 
 	// wait until the region task is finished.
 	if success := <-notifier; !success {
@@ -429,7 +422,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 
 	// update region state.
 	// note, ps.region and peer state are not modified inside this function.
-	meta.WriteRegionState(kvWB, ps.region, rspb.PeerState_Normal)
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
 	log.Infof("region state key: %v", meta.RegionStateKey(snapData.Region.Id))
 	log.Infof("restore region from snapshot (CV:%v V:%v) -> (CV:%v V:%v)", ps.Region().RegionEpoch.ConfVer,
 		ps.region.RegionEpoch.Version, snapData.Region.RegionEpoch.ConfVer, snapData.Region.RegionEpoch.Version)
