@@ -15,6 +15,8 @@ import (
 	"github.com/pingcap-incubator/tinykv/raft"
 )
 
+// TODO(3B): add logic for ApproximateSize and ....
+
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	// reject raft cmd if this peer is stopped.
 	if d.stopped {

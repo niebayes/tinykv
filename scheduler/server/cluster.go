@@ -276,9 +276,70 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 	return nil
 }
 
+func (c *RaftCluster) checkStaleRegion(origin *metapb.Region, region *metapb.Region) error {
+	o := origin.GetRegionEpoch()
+	e := region.GetRegionEpoch()
+
+	if e.GetVersion() < o.GetVersion() || e.GetConfVer() < o.GetConfVer() {
+		return ErrRegionIsStale(region, origin)
+	}
+
+	return nil
+}
+
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
-	// Your Code Here (3C).
+	// check if this region is cached in the local storage.
+	originRegion := c.GetRegion(region.GetID())
+
+	if originRegion != nil {
+		// if it's cached, check if it's stale according to region epoch.
+		if err := c.checkStaleRegion(originRegion.GetMeta(), region.GetMeta()); err != nil {
+			return err
+		}
+
+		needUpdate := false
+
+		// check if the leader has changed.
+		if originRegion.GetLeader().GetId() != region.GetLeader().GetId() || originRegion.GetLeader().GetStoreId() != region.GetLeader().GetStoreId() {
+			needUpdate = true
+		}
+
+		// check if the new one or the original one has pending peers.
+		if len(region.GetPendingPeers()) > 0 || len(originRegion.GetPendingPeers()) > 0 {
+			needUpdate = true
+		}
+
+		// check if the ApproximateSize has changed.
+		if region.GetApproximateSize() != originRegion.GetApproximateSize() {
+			needUpdate = true
+		}
+
+		if !needUpdate {
+			return ErrRegionIsStale(region.GetMeta(), originRegion.GetMeta())
+		}
+
+	} else {
+		// it's not cached. This may due to region split or merge or the region is a fresh one,
+		// so further check each region overlapped with the region.
+		localRegions := c.core.GetOverlaps(region)
+		for _, origin := range localRegions {
+			if err := c.checkStaleRegion(origin.GetMeta(), region.GetMeta()); err != nil {
+				return err
+			}
+		}
+	}
+
+	// if the region was cached but there's some update, we need to update it.
+	// or if the region was not cached, we need to cache it.
+	if err := c.putRegion(region); err != nil {
+		return err
+	}
+	// the updates in putRegion is grouped by store, but this update is not reflected
+	// in stores yet. So call updateStoreStatusLocked to install these updates.
+	for _, peer := range region.GetPeers() {
+		c.updateStoreStatusLocked(peer.GetStoreId())
+	}
 
 	return nil
 }

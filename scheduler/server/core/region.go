@@ -281,6 +281,7 @@ func (r *RegionInfo) GetRegionEpoch() *metapb.RegionEpoch {
 }
 
 // regionMap wraps a map[uint64]*core.RegionInfo and supports randomly pick a region.
+// key: region id,  value: RegionInfo.
 type regionMap struct {
 	m         map[uint64]*RegionInfo
 	totalSize int64
