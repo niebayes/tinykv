@@ -386,6 +386,7 @@ func (d *peerMsgHandler) handleCompactLog(request *raft_cmdpb.CompactLogRequest)
 }
 
 func (d *peerMsgHandler) handleTransferLeader(request *raft_cmdpb.TransferLeaderRequest) {
+	// TODO(3B): handle the case that there're only two peers.
 	d.RaftGroup.TransferLeader(request.Peer.Id)
 	if d.IsLeader() {
 		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
