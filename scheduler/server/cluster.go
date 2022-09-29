@@ -287,7 +287,16 @@ func (c *RaftCluster) checkStaleRegion(origin *metapb.Region, region *metapb.Reg
 	return nil
 }
 
+// return true if the region's epoch is newer than the origin's epoch.
+func checkNewRegionEpoch(origin *metapb.Region, region *metapb.Region) bool {
+	o := origin.GetRegionEpoch()
+	e := region.GetRegionEpoch()
+	return e.GetVersion() > o.GetVersion() || e.GetConfVer() > o.GetConfVer()
+}
+
 // processRegionHeartbeat updates the region information.
+// return nil if there's no update on the region or there's update
+// and the update is successfully applied.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// check if this region is cached in the local storage.
 	originRegion := c.GetRegion(region.GetID())
@@ -300,6 +309,11 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 
 		needUpdate := false
 
+		// check if the region epoch has changed.
+		if checkNewRegionEpoch(originRegion.GetMeta(), region.GetMeta()) {
+			needUpdate = true
+		}
+
 		// check if the leader has changed.
 		if originRegion.GetLeader().GetId() != region.GetLeader().GetId() || originRegion.GetLeader().GetStoreId() != region.GetLeader().GetStoreId() {
 			needUpdate = true
@@ -310,13 +324,27 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 			needUpdate = true
 		}
 
+		// check if the peer has changed.
+		cachePeers := originRegion.GetPeers()
+		newPeers := region.GetPeers()
+		if len(cachePeers) != len(newPeers) {
+			needUpdate = true
+		} else {
+			for i := 0; i < len(cachePeers); i++ {
+				if cachePeers[i].Id != newPeers[i].Id || cachePeers[i].StoreId != newPeers[i].StoreId {
+					needUpdate = true
+					break
+				}
+			}
+		}
+
 		// check if the ApproximateSize has changed.
 		if region.GetApproximateSize() != originRegion.GetApproximateSize() {
 			needUpdate = true
 		}
 
 		if !needUpdate {
-			return ErrRegionIsStale(region.GetMeta(), originRegion.GetMeta())
+			return nil
 		}
 
 	} else {
