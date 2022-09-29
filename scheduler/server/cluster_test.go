@@ -284,6 +284,7 @@ func (s *testClusterInfoSuite) TestRegionChangeApproximateSize3C(c *C) {
 	}
 }
 
+// test peer change will incur a cache update.
 func (s *testClusterInfoSuite) TestRegionCounts3C(c *C) {
 	cluster, regions := s.setUpTestCluster(c)
 

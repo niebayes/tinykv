@@ -58,6 +58,7 @@ func (s *testBalanceRegionSchedulerSuite) TestReplicas13C(c *C) {
 	opt.SetMaxReplicas(1)
 
 	// Add stores 1,2,3,4.
+	// note, region size is simply 10 times the region count.
 	tc.AddRegionStore(1, 6)
 	tc.AddRegionStore(2, 8)
 	tc.AddRegionStore(3, 8)

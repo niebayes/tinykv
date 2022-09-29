@@ -119,8 +119,7 @@ project3b:
 	$(TEST_CLEAN)
 
 project3c:
-	# $(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"
-	$(GOTEST) ./scheduler/server -check.f="3C"
+	$(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"
 
 project4: project4a project4b project4c
 
