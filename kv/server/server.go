@@ -73,6 +73,7 @@ func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcp
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 	txn := mvcc.NewMvccTxn(reader, req.GetVersion())
 
 	// check if there's a pending lock on this key.
@@ -110,6 +111,7 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 	txn := mvcc.NewMvccTxn(reader, req.GetStartVersion())
 
 	// lock all keys to be examined.
@@ -198,21 +200,6 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	return response, nil
 }
 
-// type KeyError struct {
-// 	Locked               *LockInfo      `protobuf:"bytes,1,opt,name=locked" json:"locked,omitempty"`
-// 	Retryable            string         `protobuf:"bytes,2,opt,name=retryable,proto3" json:"retryable,omitempty"`
-// 	Abort                string         `protobuf:"bytes,3,opt,name=abort,proto3" json:"abort,omitempty"`
-// 	Conflict             *WriteConflict `protobuf:"bytes,4,opt,name=conflict" json:"conflict,omitempty"`
-
-// type Error struct {
-// Message              string          `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
-// NotLeader            *NotLeader      `protobuf:"bytes,2,opt,name=not_leader,json=notLeader" json:"not_leader,omitempty"`
-// RegionNotFound       *RegionNotFound `protobuf:"bytes,3,opt,name=region_not_found,json=regionNotFound" json:"region_not_found,omitempty"`
-// KeyNotInRegion       *KeyNotInRegion `protobuf:"bytes,4,opt,name=key_not_in_region,json=keyNotInRegion" json:"key_not_in_region,omitempty"`
-// EpochNotMatch        *EpochNotMatch  `protobuf:"bytes,5,opt,name=epoch_not_match,json=epochNotMatch" json:"epoch_not_match,omitempty"`
-// StaleCommand         *StaleCommand   `protobuf:"bytes,7,opt,name=stale_command,json=staleCommand" json:"stale_command,omitempty"`
-// StoreNotMatch        *StoreNotMatch  `protobuf:"bytes,8,opt,name=store_not_match,json=storeNotMatch" json:"store_not_match,omitempty"`
-
 func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*kvrpcpb.CommitResponse, error) {
 	// note, separating commits for primary and secondary rows are controlled by the client, not this server.
 
@@ -222,6 +209,7 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 	txn := mvcc.NewMvccTxn(reader, req.GetStartVersion())
 
 	keys := req.GetKeys()
