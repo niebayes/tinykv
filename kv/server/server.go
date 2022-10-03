@@ -72,6 +72,13 @@ func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcp
 	// this is just a note, not a comment.
 
 	key := req.GetKey()
+	// in the Percolator paper, to access a row in the database, you need to use the row txn
+	// provided by Bigtable. In tinykv, there's no such a row txn feature. So we use a latch
+	// per key, aka. a latch per row, to provide atomicity of accessing a row.
+	keysToLatch := [][]byte{key}
+	// wait for latches and then acquire the latches.
+	server.Latches.WaitForLatches(keysToLatch)
+
 	response := &kvrpcpb.GetResponse{NotFound: true}
 
 	// MvccTxn is the interface to the percolator worker in the server side.
@@ -97,6 +104,8 @@ func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcp
 		return nil, err
 	}
 	response.Value = val
+
+	server.Latches.ReleaseLatches(keysToLatch)
 
 	return response, nil
 }
