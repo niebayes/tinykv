@@ -20,7 +20,7 @@ var _ tinykvpb.TinyKvServer = new(Server)
 type Server struct {
 	storage storage.Storage
 
-	// (Used in 4A/4B)
+	// (Used in 4B)
 	Latches *latches.Latches
 
 	// coprocessor API handler, out of course scope
@@ -50,7 +50,9 @@ func (server *Server) Snapshot(stream tinykvpb.TinyKv_SnapshotServer) error {
 
 // Transactional API.
 func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcpb.GetResponse, error) {
-	// Your Code Here (4B).
+	// note, req.Context is used by router for routing the message to the expected tinykv server.
+
+
 	return nil, nil
 }
 

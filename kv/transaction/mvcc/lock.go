@@ -14,8 +14,8 @@ const TsMax uint64 = ^uint64(0)
 
 type Lock struct {
 	Primary []byte
-	Ts      uint64
-	Ttl     uint64
+	Ts      uint64 // start timestamp.
+	Ttl     uint64 // time to live.
 	Kind    WriteKind
 }
 
