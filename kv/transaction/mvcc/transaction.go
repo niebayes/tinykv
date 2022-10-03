@@ -3,7 +3,6 @@ package mvcc
 import (
 	"bytes"
 	"encoding/binary"
-	"math"
 
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/codec"
@@ -207,7 +206,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	// won't stop at the corresponding write record of the latest version, since the commit timestamp
 	// of the write record is greater than X and hence iter.Seek will skip it.
 	// as a result, we cannot find the corresponding write with this txn's start timestamp.
-	encodedKey := EncodeKey(key, math.MaxUint64)
+	encodedKey := EncodeKey(key, TsMax)
 	for iter.Seek(encodedKey); iter.Valid(); iter.Next() {
 		item := iter.Item()
 		userKey := DecodeUserKey(item.Key())
@@ -236,7 +235,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 // write's commit timestamp, or an error.
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
-	encodedKey := EncodeKey(key, math.MaxUint64)
+	encodedKey := EncodeKey(key, TsMax)
 	for iter.Seek(encodedKey); iter.Valid(); iter.Next() {
 		item := iter.Item()
 		userKey := DecodeUserKey(item.Key())
