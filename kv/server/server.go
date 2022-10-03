@@ -100,37 +100,10 @@ func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcp
 	return response, nil
 }
 
-// type PrewriteRequest struct {
-// 	Context   *Context    `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
-// 	Mutations []*Mutation `protobuf:"bytes,2,rep,name=mutations" json:"mutations,omitempty"`
-// 	// Key of the primary lock.
-// 	PrimaryLock          []byte   `protobuf:"bytes,3,opt,name=primary_lock,json=primaryLock,proto3" json:"primary_lock,omitempty"`
-// 	StartVersion         uint64   `protobuf:"varint,4,opt,name=start_version,json=startVersion,proto3" json:"start_version,omitempty"`
-// 	LockTtl              uint64   `protobuf:"varint,5,opt,name=lock_ttl,json=lockTtl,proto3" json:"lock_ttl,omitempty"`
-
-// type Mutation struct {
-// 	Op                   Op       `protobuf:"varint,1,opt,name=op,proto3,enum=kvrpcpb.Op" json:"op,omitempty"`
-// 	Key                  []byte   `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
-// 	Value                []byte   `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
-
-// type KeyError struct {
-// 	Locked               *LockInfo      `protobuf:"bytes,1,opt,name=locked" json:"locked,omitempty"`
-// 	Retryable            string         `protobuf:"bytes,2,opt,name=retryable,proto3" json:"retryable,omitempty"`
-// 	Abort                string         `protobuf:"bytes,3,opt,name=abort,proto3" json:"abort,omitempty"`
-// 	Conflict             *WriteConflict `protobuf:"bytes,4,opt,name=conflict" json:"conflict,omitempty"`
-
-// type Error struct {
-// Message              string          `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
-// NotLeader            *NotLeader      `protobuf:"bytes,2,opt,name=not_leader,json=notLeader" json:"not_leader,omitempty"`
-// RegionNotFound       *RegionNotFound `protobuf:"bytes,3,opt,name=region_not_found,json=regionNotFound" json:"region_not_found,omitempty"`
-// KeyNotInRegion       *KeyNotInRegion `protobuf:"bytes,4,opt,name=key_not_in_region,json=keyNotInRegion" json:"key_not_in_region,omitempty"`
-// EpochNotMatch        *EpochNotMatch  `protobuf:"bytes,5,opt,name=epoch_not_match,json=epochNotMatch" json:"epoch_not_match,omitempty"`
-// StaleCommand         *StaleCommand   `protobuf:"bytes,7,opt,name=stale_command,json=staleCommand" json:"stale_command,omitempty"`
-// StoreNotMatch        *StoreNotMatch  `protobuf:"bytes,8,opt,name=store_not_match,json=storeNotMatch" json:"store_not_match,omitempty"`
-
 func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest) (*kvrpcpb.PrewriteResponse, error) {
+	// note, separating prewrites for primary and secondary rows are controlled by the client, not this server.
+
 	response := &kvrpcpb.PrewriteResponse{}
-	// response.Errors = make([]*kvrpcpb.KeyError, len(req.GetMutations()))
 	response.Errors = make([]*kvrpcpb.KeyError, 0)
 
 	reader, err := server.storage.Reader(req.GetContext())
@@ -149,7 +122,7 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	defer server.Latches.ReleaseLatches(keysToLatch)
 
 	// check if there's a write-write conflict for each key.
-	abort := false
+	conflict := false
 	for i := 0; i < len(muts); i++ {
 		key := muts[i].GetKey()
 		_, commitTS, err := txn.MostRecentWrite(key)
@@ -162,8 +135,6 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 			// of the committed write belong to the other txn is lost, hence a lost update which shall
 			// be avoided in snapshot isolation.
 
-			// FIXME: What string to fill in Abort?
-			// response.Errors[i] = &kvrpcpb.KeyError{Abort: "true"}
 			response.Errors = append(response.Errors, &kvrpcpb.KeyError{
 				Conflict: &kvrpcpb.WriteConflict{
 					StartTs:    txn.StartTS,
@@ -172,10 +143,10 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 					Primary:    req.GetPrimaryLock(),
 				},
 			})
-			abort = true
+			conflict = true
 		}
 	}
-	if abort {
+	if conflict {
 		return response, nil
 	}
 
@@ -190,7 +161,6 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 		if lock != nil {
 			// note, no need to check for the lock's start timestamp. Since we are about to
 			// write the row, we have to take the only lock.
-			// response.Errors[i] = &kvrpcpb.KeyError{Locked: lock.Info(key)}
 			response.Errors = append(response.Errors, &kvrpcpb.KeyError{Locked: lock.Info(key)})
 			locked = true
 		}
@@ -199,8 +169,9 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 		return response, nil
 	}
 
-	// group all writes on lock and write column families.
+	// group all writes: writes on data column and writes on lock column.
 	for _, mut := range muts {
+		// write lock.
 		lock := &mvcc.Lock{
 			Primary: req.GetPrimaryLock(),
 			Ts:      txn.StartTS,
@@ -208,7 +179,15 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 			Kind:    mvcc.WriteKindFromProto(mut.GetOp()),
 		}
 		txn.PutLock(mut.GetKey(), lock)
-		txn.PutValue(mut.GetKey(), mut.GetValue())
+
+		// write data.
+		if mut.GetOp() == kvrpcpb.Op_Put {
+			txn.PutValue(mut.GetKey(), mut.GetValue())
+		} else if mut.GetOp() == kvrpcpb.Op_Del {
+			txn.DeleteValue(mut.GetKey())
+		} else {
+			panic("invalid op type")
+		}
 	}
 
 	// write all writes to disk.
@@ -219,9 +198,82 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	return response, nil
 }
 
+// type KeyError struct {
+// 	Locked               *LockInfo      `protobuf:"bytes,1,opt,name=locked" json:"locked,omitempty"`
+// 	Retryable            string         `protobuf:"bytes,2,opt,name=retryable,proto3" json:"retryable,omitempty"`
+// 	Abort                string         `protobuf:"bytes,3,opt,name=abort,proto3" json:"abort,omitempty"`
+// 	Conflict             *WriteConflict `protobuf:"bytes,4,opt,name=conflict" json:"conflict,omitempty"`
+
+// type Error struct {
+// Message              string          `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
+// NotLeader            *NotLeader      `protobuf:"bytes,2,opt,name=not_leader,json=notLeader" json:"not_leader,omitempty"`
+// RegionNotFound       *RegionNotFound `protobuf:"bytes,3,opt,name=region_not_found,json=regionNotFound" json:"region_not_found,omitempty"`
+// KeyNotInRegion       *KeyNotInRegion `protobuf:"bytes,4,opt,name=key_not_in_region,json=keyNotInRegion" json:"key_not_in_region,omitempty"`
+// EpochNotMatch        *EpochNotMatch  `protobuf:"bytes,5,opt,name=epoch_not_match,json=epochNotMatch" json:"epoch_not_match,omitempty"`
+// StaleCommand         *StaleCommand   `protobuf:"bytes,7,opt,name=stale_command,json=staleCommand" json:"stale_command,omitempty"`
+// StoreNotMatch        *StoreNotMatch  `protobuf:"bytes,8,opt,name=store_not_match,json=storeNotMatch" json:"store_not_match,omitempty"`
+
 func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*kvrpcpb.CommitResponse, error) {
-	// Your Code Here (4B).
-	return nil, nil
+	// note, separating commits for primary and secondary rows are controlled by the client, not this server.
+
+	response := &kvrpcpb.CommitResponse{}
+
+	reader, err := server.storage.Reader(req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	txn := mvcc.NewMvccTxn(reader, req.GetStartVersion())
+
+	keys := req.GetKeys()
+	server.Latches.WaitForLatches(keys)
+	defer server.Latches.ReleaseLatches(keys)
+
+	// check if this is a duplicate commit request.
+	for _, key := range keys {
+		// CurrentWrite will return a write whose start timestamp == txn.StartTS.
+		write, _, err := txn.CurrentWrite(key)
+		if err != nil {
+			return nil, err
+		}
+		// if the returned write is not nil, then this commit request is duplicated since they
+		// convey the same start timestamp and hence they correspond to the same txn.
+		if write != nil {
+			if write.Kind == mvcc.WriteKindDelete || write.Kind == mvcc.WriteKindRollback {
+				response.Error = &kvrpcpb.KeyError{Abort: "true"}
+			}
+			return response, nil
+		}
+	}
+
+	// collect writes' kind for each key from locks.
+	writeKinds := make([]mvcc.WriteKind, 0)
+
+	// ensure the locks are present currently.
+	for _, key := range keys {
+		lock, err := txn.GetLock(key)
+		if err != nil {
+			return nil, err
+		}
+		// if the lock does not exist or the lock is alternated by a different lock from another txn, abort.
+		if lock == nil || lock.Ts != txn.StartTS {
+			response.Error = &kvrpcpb.KeyError{Retryable: "true"}
+			return response, nil
+		}
+		writeKinds = append(writeKinds, lock.Kind)
+	}
+
+	// group deletions of all locks and puts of all writes.
+	for i := 0; i < len(keys); i++ {
+		key := keys[i]
+		txn.DeleteLock(key)
+		txn.PutWrite(key, req.GetCommitVersion(), &mvcc.Write{StartTS: txn.StartTS, Kind: writeKinds[i]})
+	}
+
+	// write to disk.
+	if err := server.storage.Write(req.GetContext(), txn.Writes()); err != nil {
+		return nil, err
+	}
+	return response, nil
 }
 
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
