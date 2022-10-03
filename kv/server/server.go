@@ -265,22 +265,70 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 }
 
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
-	// Your Code Here (4C).
 	return nil, nil
 }
 
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
-	// Your Code Here (4C).
 	return nil, nil
 }
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
-	// Your Code Here (4C).
-	return nil, nil
+	response := &kvrpcpb.BatchRollbackResponse{}
+
+	reader, err := server.storage.Reader(req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	txn := mvcc.NewMvccTxn(reader, req.GetStartVersion())
+	keys := req.GetKeys()
+
+	for _, key := range keys {
+		// check if this request is duplicated.
+		write, commitTS, err := txn.CurrentWrite(key)
+		if err != nil {
+			return nil, err
+		}
+		if write != nil {
+			// if the write is already rollbacked.
+			if write.Kind == mvcc.WriteKindRollback && commitTS == txn.StartTS {
+				// response.Error = &kvrpcpb.KeyError{Abort: "true"}
+				return response, nil
+			}
+			// if the write is already committed.
+			if write.Kind == mvcc.WriteKindPut && commitTS > txn.StartTS {
+				response.Error = &kvrpcpb.KeyError{Abort: "true"}
+				return response, nil
+			}
+		}
+
+		// check if the lock is still present.
+		lock, err := txn.GetLock(key)
+		if err != nil {
+			return nil, err
+		}
+		// if the lock is missing, this write may be already rollbacked or committed.
+		// but we still write a rollback record as the test suite requires.
+		if lock != nil && lock.Ts == txn.StartTS {
+			// delete the lock and the corresponding value.
+			txn.DeleteLock(key)
+			if lock.Kind == mvcc.WriteKindPut {
+				txn.DeleteValue(key)
+			}
+		}
+		// leave a rollback indicator to the write column.
+		txn.PutWrite(key, txn.StartTS, &mvcc.Write{StartTS: txn.StartTS, Kind: mvcc.WriteKindRollback})
+	}
+
+	if err := server.storage.Write(req.GetContext(), txn.Writes()); err != nil {
+		return nil, err
+	}
+
+	return response, nil
 }
 
 func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
-	// Your Code Here (4C).
 	return nil, nil
 }
 

@@ -55,6 +55,7 @@ func (txn *MvccTxn) PutWrite(key []byte, commitTs uint64, write *Write) {
 // if an error occurs during lookup.
 func (txn *MvccTxn) GetLock(key []byte) (*Lock, error) {
 	it := txn.Reader.IterCF(engine_util.CfLock)
+	defer it.Close()
 	for it.Seek(key); it.Valid(); it.Next() {
 		item := it.Item()
 		if bytes.Equal(item.Key(), key) {
@@ -106,6 +107,7 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	// since the keys are sorted ascending by userkey, iter.Seek would stop seeking at
 	// the smallest key with its userkey >= key.
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	for iter.Seek(encodedKey); iter.Valid(); iter.Next() {
 		item := iter.Item()
 		userKey := DecodeUserKey(item.Key())
@@ -134,6 +136,7 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 			// the written value of this put operation.
 			encodedKey = EncodeKey(key, write.StartTS)
 			iter = txn.Reader.IterCF(engine_util.CfDefault)
+			defer iter.Close()
 			iter.Seek(encodedKey)
 			if !iter.Valid() {
 				panic("a committed value must exist")
@@ -197,6 +200,7 @@ func (txn *MvccTxn) DeleteValue(key []byte) {
 // write's commit timestamp, or an error.
 func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	// since verions/records of key are sorted descending by timestamp, we let the seeking
 	// stops at the latest version of the version/record. This is because the write column
 	// encodes key + commit timestamp where commit timestamp is greater than the start timestamp
@@ -235,6 +239,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 // write's commit timestamp, or an error.
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	encodedKey := EncodeKey(key, TsMax)
 	for iter.Seek(encodedKey); iter.Valid(); iter.Next() {
 		item := iter.Item()
