@@ -413,21 +413,6 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 	return response, nil
 }
 
-// The client will make a resolve lock request for all secondary keys once it has successfully
-// committed or rolled back the primary key.
-// Resolve lock will find all locks belonging to the transaction with the given start timestamp.
-// If commit_version is 0, TinyKV will rollback all locks. If commit_version is greater than
-// 0 it will commit those locks with the given commit timestamp.
-// type ResolveLockRequest struct {
-// 	Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
-// 	StartVersion         uint64   `protobuf:"varint,2,opt,name=start_version,json=startVersion,proto3" json:"start_version,omitempty"`
-// 	CommitVersion        uint64   `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
-
-// Empty if the lock is resolved successfully.
-// type ResolveLockResponse struct {
-// 	RegionError          *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
-// 	Error                *KeyError      `protobuf:"bytes,2,opt,name=error" json:"error,omitempty"`
-
 // FIXME: figure out when each service handler is called and why they're called.
 func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
 	response := &kvrpcpb.ResolveLockResponse{}
