@@ -74,6 +74,35 @@ func (txn *MvccTxn) GetLock(key []byte) (*Lock, error) {
 	return nil, nil
 }
 
+// get all keys will look up the lock column family to collect all keys with lock's
+// start timestamp == txn's start timestamp.
+func (txn *MvccTxn) GetAllKeys() [][]byte {
+	keys := make([][]byte, 0)
+
+	iter := txn.Reader.IterCF(engine_util.CfLock)
+	defer iter.Close()
+
+	for ; iter.Valid(); iter.Next() {
+		item := iter.Item()
+		val, err := item.Value()
+		if err != nil {
+			panic(err)
+		}
+		lock, err := ParseLock(val)
+		if err != nil {
+			panic(err)
+		}
+
+		if lock.Ts == txn.StartTS {
+			key := make([]byte, 0)
+			key = item.KeyCopy(key)
+			keys = append(keys, key)
+		}
+	}
+
+	return keys
+}
+
 // PutLock adds a key/lock to this transaction.
 func (txn *MvccTxn) PutLock(key []byte, lock *Lock) {
 	put := storage.Put{
@@ -215,7 +244,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 		item := iter.Item()
 		userKey := DecodeUserKey(item.Key())
 		if !bytes.Equal(userKey, key) {
-			return nil, 0, nil
+			continue
 		}
 
 		val, err := item.Value()

@@ -413,8 +413,69 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 	return response, nil
 }
 
+// The client will make a resolve lock request for all secondary keys once it has successfully
+// committed or rolled back the primary key.
+// Resolve lock will find all locks belonging to the transaction with the given start timestamp.
+// If commit_version is 0, TinyKV will rollback all locks. If commit_version is greater than
+// 0 it will commit those locks with the given commit timestamp.
+// type ResolveLockRequest struct {
+// 	Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+// 	StartVersion         uint64   `protobuf:"varint,2,opt,name=start_version,json=startVersion,proto3" json:"start_version,omitempty"`
+// 	CommitVersion        uint64   `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
+
+// Empty if the lock is resolved successfully.
+// type ResolveLockResponse struct {
+// 	RegionError          *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
+// 	Error                *KeyError      `protobuf:"bytes,2,opt,name=error" json:"error,omitempty"`
+
+// FIXME: figure out when each service handler is called and why they're called.
 func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
-	return nil, nil
+	response := &kvrpcpb.ResolveLockResponse{}
+
+	reader, err := server.storage.Reader(req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	txn := mvcc.NewMvccTxn(reader, req.GetStartVersion())
+
+	// iterate lock column to find all locks belong to this txn.
+	keys := txn.GetAllKeys()
+	if len(keys) == 0 {
+		// no locks found belong to this txn.
+		return response, nil
+	}
+
+	if req.GetCommitVersion() == 0 {
+		// rollback all locks.
+		rollbackResponse, err := server.KvBatchRollback(nil, &kvrpcpb.BatchRollbackRequest{
+			Context:      req.GetContext(),
+			StartVersion: req.GetStartVersion(),
+			Keys:         keys,
+		})
+		if err != nil {
+			return nil, err
+		}
+		response.RegionError = rollbackResponse.GetRegionError()
+		response.Error = rollbackResponse.GetError()
+		return response, nil
+
+	} else {
+		// commit all locks.
+		commitResponse, err := server.KvCommit(nil, &kvrpcpb.CommitRequest{
+			Context:       req.GetContext(),
+			StartVersion:  req.GetStartVersion(),
+			Keys:          keys,
+			CommitVersion: req.GetCommitVersion(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		response.RegionError = commitResponse.GetRegionError()
+		response.Error = commitResponse.GetError()
+		return response, nil
+	}
 }
 
 // SQL push down commands.
