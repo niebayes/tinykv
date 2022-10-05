@@ -268,8 +268,119 @@ func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrp
 	return nil, nil
 }
 
+// CheckTxnStatus reports on the status of a transaction and may take action to
+// rollback expired locks.
+// If the transaction has previously been rolled back or committed, return that information.
+// If the TTL of the transaction is exhausted, abort that transaction and roll back the primary lock.
+// Otherwise, returns the TTL information.
+// type CheckTxnStatusRequest struct {
+// 	Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+// 	PrimaryKey           []byte   `protobuf:"bytes,2,opt,name=primary_key,json=primaryKey,proto3" json:"primary_key,omitempty"`
+// 	LockTs               uint64   `protobuf:"varint,3,opt,name=lock_ts,json=lockTs,proto3" json:"lock_ts,omitempty"`
+// 	CurrentTs            uint64   `protobuf:"varint,4,opt,name=current_ts,json=currentTs,proto3" json:"current_ts,omitempty"`
+
+// type CheckTxnStatusResponse struct {
+// 	RegionError *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
+// 	// Three kinds of txn status:
+// 	// locked: lock_ttl > 0
+// 	// committed: commit_version > 0
+// 	// rolled back: lock_ttl == 0 && commit_version == 0
+// 	LockTtl       uint64 `protobuf:"varint,2,opt,name=lock_ttl,json=lockTtl,proto3" json:"lock_ttl,omitempty"`
+// 	CommitVersion uint64 `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
+// 	// The action performed by TinyKV in response to the CheckTxnStatus request.
+// 	Action               Action   `protobuf:"varint,4,opt,name=action,proto3,enum=kvrpcpb.Action" json:"action,omitempty"`
+
+// const (
+// 	Action_NoAction Action = 0
+// The lock is rolled back because it has expired.
+// 	Action_TTLExpireRollback Action = 1
+// The lock does not exist, TinyKV left a record of the rollback, but did not
+// have to delete a lock.
+// 	Action_LockNotExistRollback Action = 2
+// )
+
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
-	return nil, nil
+	response := &kvrpcpb.CheckTxnStatusResponse{}
+
+	reader, err := server.storage.Reader(req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	// note, this txn's timestamp is lock.Ts not the timestamp of a new txn.
+	txn := mvcc.NewMvccTxn(reader, req.GetLockTs())
+
+	key := req.GetPrimaryKey()
+	// CurrentWrite will retrieve the write with commitTS == txn.StartTS.
+	// as a side note, when we rollback a txn/lock, we simultaneously write a write record
+	// with commitTS == txn.StartTS == lock.Ts.
+	write, commitTS, err := txn.CurrentWrite(key)
+	if err != nil {
+		return nil, err
+	}
+	if write != nil {
+		// has write.
+
+		if write.Kind == mvcc.WriteKindRollback {
+			// this txn is already rollbacked.
+			// FIXME: why set commitTS to 0
+			response.CommitVersion = uint64(0)
+			return response, nil
+		}
+		// otherwise, this txn is already committed.
+		response.CommitVersion = commitTS
+		return response, nil
+	}
+	// no write.
+
+	lock, err := txn.GetLock(key)
+	if err != nil {
+		return nil, err
+	}
+	if lock == nil {
+		// no lock, no write, just put a rollback write to tell the subsequent txns that it's rollbacked,
+		// although there's nothing to rollback. Since the subsequent txn's does not need to know whether
+		// there's something rollbacked or not.
+		response.Action = kvrpcpb.Action_LockNotExistRollback
+		txn.PutWrite(key, req.GetLockTs(), &mvcc.Write{StartTS: req.GetLockTs(), Kind: mvcc.WriteKindRollback})
+
+		if err := server.storage.Write(req.GetContext(), txn.Writes()); err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+	// has write and lock.
+
+	// the lock is alternated by another txn.
+	if lock.Ts != txn.StartTS {
+		return response, nil
+	}
+
+	// check lock's ttl to check if this txn is timed out.
+	currentTime := mvcc.PhysicalTime(req.GetCurrentTs())
+	expireTime := mvcc.PhysicalTime(lock.Ts) + lock.Ttl
+	if currentTime >= expireTime {
+		// remove the expired lock and the value if any.
+		txn.DeleteLock(key)
+		if lock.Kind == mvcc.WriteKindPut {
+			txn.DeleteValue(key)
+		}
+		// write a record to indicate this write is rollbacked.
+		// the reason why we set the commitTS of this rollback write record is that the CurrentWrite
+		// will find this write record and so kvCheckTxnStatus will inspect this record and find this
+		// lock is already rollbacked
+		txn.PutWrite(key, req.GetLockTs(), &mvcc.Write{StartTS: req.GetLockTs(), Kind: mvcc.WriteKindRollback})
+
+		if err := server.storage.Write(req.GetContext(), txn.Writes()); err != nil {
+			return nil, err
+		}
+
+		response.Action = kvrpcpb.Action_TTLExpireRollback
+		return response, nil
+	}
+
+	return response, nil
 }
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
@@ -293,7 +404,6 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 		if write != nil {
 			// if the write is already rollbacked.
 			if write.Kind == mvcc.WriteKindRollback && commitTS == txn.StartTS {
-				// response.Error = &kvrpcpb.KeyError{Abort: "true"}
 				return response, nil
 			}
 			// if the write is already committed.
