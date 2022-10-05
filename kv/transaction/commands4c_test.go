@@ -432,49 +432,66 @@ func builderForScan(t *testing.T) *testBuilder {
 		// Committed before 100.
 		{engine_util.CfDefault, []byte{1}, 80, []byte{50}},
 		{engine_util.CfWrite, []byte{1}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{1, 23}, 80, []byte{55}},
 		{engine_util.CfWrite, []byte{1, 23}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{3}, 80, []byte{51}},
 		{engine_util.CfWrite, []byte{3}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{3, 45}, 80, []byte{56}},
 		{engine_util.CfWrite, []byte{3, 45}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{3, 46}, 80, []byte{57}},
 		{engine_util.CfWrite, []byte{3, 46}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{3, 47}, 80, []byte{58}},
 		{engine_util.CfWrite, []byte{3, 47}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{3, 48}, 80, []byte{59}},
 		{engine_util.CfWrite, []byte{3, 48}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{4}, 80, []byte{52}},
 		{engine_util.CfWrite, []byte{4}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{120}, 80, []byte{53}},
 		{engine_util.CfWrite, []byte{120}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfDefault, []byte{199}, 80, []byte{54}},
 		{engine_util.CfWrite, []byte{199}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
 
 		// Committed after 100.
 		{engine_util.CfDefault, []byte{4, 45}, 110, []byte{58}},
 		{engine_util.CfWrite, []byte{4, 45}, 116, []byte{1, 0, 0, 0, 0, 0, 0, 0, 110}},
+
 		{engine_util.CfDefault, []byte{4, 46}, 110, []byte{57}},
 		{engine_util.CfWrite, []byte{4, 46}, 116, []byte{1, 0, 0, 0, 0, 0, 0, 0, 110}},
+
 		{engine_util.CfDefault, []byte{4, 47}, 110, []byte{58}},
 		{engine_util.CfWrite, []byte{4, 47}, 116, []byte{1, 0, 0, 0, 0, 0, 0, 0, 110}},
+
 		{engine_util.CfDefault, []byte{4, 48}, 110, []byte{59}},
 		{engine_util.CfWrite, []byte{4, 48}, 116, []byte{1, 0, 0, 0, 0, 0, 0, 0, 110}},
 
 		// Committed after 100, but started before.
 		{engine_util.CfDefault, []byte{5, 45}, 97, []byte{60}},
 		{engine_util.CfWrite, []byte{5, 45}, 101, []byte{1, 0, 0, 0, 0, 0, 0, 0, 97}},
+
 		{engine_util.CfDefault, []byte{5, 46}, 97, []byte{61}},
 		{engine_util.CfWrite, []byte{5, 46}, 101, []byte{1, 0, 0, 0, 0, 0, 0, 0, 97}},
+
 		{engine_util.CfDefault, []byte{5, 47}, 97, []byte{62}},
 		{engine_util.CfWrite, []byte{5, 47}, 101, []byte{1, 0, 0, 0, 0, 0, 0, 0, 97}},
+
 		{engine_util.CfDefault, []byte{5, 48}, 97, []byte{63}},
 		{engine_util.CfWrite, []byte{5, 48}, 101, []byte{1, 0, 0, 0, 0, 0, 0, 0, 97}},
 
 		// A deleted value and replaced value.
 		{engine_util.CfDefault, []byte{150}, 80, []byte{42}},
 		{engine_util.CfWrite, []byte{150}, 99, []byte{1, 0, 0, 0, 0, 0, 0, 0, 80}},
+
 		{engine_util.CfWrite, []byte{150}, 101, []byte{2, 0, 0, 0, 0, 0, 0, 0, 97}},
+
 		{engine_util.CfDefault, []byte{150}, 110, []byte{64}},
 		{engine_util.CfWrite, []byte{150}, 116, []byte{1, 0, 0, 0, 0, 0, 0, 0, 110}},
 	}

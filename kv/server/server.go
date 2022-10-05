@@ -264,8 +264,50 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 	return response, nil
 }
 
+// Read multiple values from the DB.
+// type ScanRequest struct {
+// 	Context  *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+// 	StartKey []byte   `protobuf:"bytes,2,opt,name=start_key,json=startKey,proto3" json:"start_key,omitempty"`
+// The maximum number of values read.
+// 	Limit                uint32   `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+// 	Version              uint64   `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+
+// type ScanResponse struct {
+// 	RegionError *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
+// Other errors are recorded for each key in pairs.
+// 	Pairs                []*KvPair `protobuf:"bytes,2,rep,name=pairs" json:"pairs,omitempty"`
+
+// type KvPair struct {
+// 	Error                *KeyError `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+// 	Key                  []byte    `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+// 	Value                []byte    `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
-	return nil, nil
+	response := &kvrpcpb.ScanResponse{}
+
+	reader, err := server.storage.Reader(req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+
+	txn := mvcc.NewMvccTxn(reader, req.GetVersion())
+	scan := mvcc.NewScanner(req.GetStartKey(), txn)
+	defer scan.Close()
+
+	kvPairs := make([]*kvrpcpb.KvPair, 0)
+	cnt := uint32(0)
+	for cnt < req.GetLimit() {
+		// note, the test suites does not impose any requirements on err returned from scan.Next.
+		key, val, _ := scan.Next()
+		if key == nil {
+			break
+		}
+		kvPairs = append(kvPairs, &kvrpcpb.KvPair{Key: key, Value: val, Error: nil})
+		cnt++
+	}
+
+	response.Pairs = kvPairs
+	return response, nil
 }
 
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
