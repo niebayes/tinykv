@@ -268,38 +268,11 @@ func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrp
 	return nil, nil
 }
 
-// CheckTxnStatus reports on the status of a transaction and may take action to
-// rollback expired locks.
-// If the transaction has previously been rolled back or committed, return that information.
-// If the TTL of the transaction is exhausted, abort that transaction and roll back the primary lock.
-// Otherwise, returns the TTL information.
-// type CheckTxnStatusRequest struct {
-// 	Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
-// 	PrimaryKey           []byte   `protobuf:"bytes,2,opt,name=primary_key,json=primaryKey,proto3" json:"primary_key,omitempty"`
-// 	LockTs               uint64   `protobuf:"varint,3,opt,name=lock_ts,json=lockTs,proto3" json:"lock_ts,omitempty"`
-// 	CurrentTs            uint64   `protobuf:"varint,4,opt,name=current_ts,json=currentTs,proto3" json:"current_ts,omitempty"`
-
-// type CheckTxnStatusResponse struct {
-// 	RegionError *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
-// 	// Three kinds of txn status:
-// 	// locked: lock_ttl > 0
-// 	// committed: commit_version > 0
-// 	// rolled back: lock_ttl == 0 && commit_version == 0
-// 	LockTtl       uint64 `protobuf:"varint,2,opt,name=lock_ttl,json=lockTtl,proto3" json:"lock_ttl,omitempty"`
-// 	CommitVersion uint64 `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
-// 	// The action performed by TinyKV in response to the CheckTxnStatus request.
-// 	Action               Action   `protobuf:"varint,4,opt,name=action,proto3,enum=kvrpcpb.Action" json:"action,omitempty"`
-
-// const (
-// 	Action_NoAction Action = 0
-// The lock is rolled back because it has expired.
-// 	Action_TTLExpireRollback Action = 1
-// The lock does not exist, TinyKV left a record of the rollback, but did not
-// have to delete a lock.
-// 	Action_LockNotExistRollback Action = 2
-// )
-
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
+	// The server will report three kinds of status to the client:
+	// locked: lock_ttl > 0
+	// committed: commit_version > 0
+	// rolled back: lock_ttl == 0 && commit_version == 0
 	response := &kvrpcpb.CheckTxnStatusResponse{}
 
 	reader, err := server.storage.Reader(req.GetContext())
@@ -324,7 +297,7 @@ func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnS
 
 		if write.Kind == mvcc.WriteKindRollback {
 			// this txn is already rollbacked.
-			// FIXME: why set commitTS to 0
+			response.LockTtl = uint64(0)
 			response.CommitVersion = uint64(0)
 			return response, nil
 		}
@@ -380,6 +353,8 @@ func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnS
 		return response, nil
 	}
 
+	// return the lock's ttl to the client.
+	response.LockTtl = lock.Ttl
 	return response, nil
 }
 
